@@ -66,6 +66,19 @@ async def main():
             )
 
         logger.info("\n--- All document sets processed ---")
+        
+        # Log total usage
+        total_usage = graph.get_total_llm_usage()
+        if total_usage and total_usage.has_values():
+            details = (
+                f"Requests: {total_usage.requests}, "
+                f"Request Tokens: {total_usage.request_tokens or 0}, "
+                f"Response Tokens: {total_usage.response_tokens or 0}, "
+                f"Total Tokens: {total_usage.total_tokens or 0}"
+            )
+            logger.info(f"[bold magenta]Overall LLM Usage:[/bold magenta] {details}")
+        else:
+            logger.info("[bold magenta]Overall LLM Usage:[/bold magenta] No usage data reported.")
 
     except Exception as e:
         logger.error(f"An error occurred in main execution: {e}", exc_info=True)

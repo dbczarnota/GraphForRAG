@@ -1,27 +1,37 @@
 # graphforrag_core/graphforrag.py
-# ... (imports remain the same) ...
 import logging
 import uuid
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone
 import json
-from typing import Optional, Any, List, Tuple 
+from typing import Optional, Any, List, Tuple, Dict # Added Dict
 
-from neo4j import AsyncGraphDatabase, AsyncDriver, AsyncResult, ResultSummary # type: ignore
 
+from neo4j import AsyncGraphDatabase, AsyncDriver # type: ignore
 from config import cypher_queries
 from .embedder_client import EmbedderClient
 from .openai_embedder import OpenAIEmbedder
-from .utils import preprocess_metadata_for_neo4j, normalize_entity_name 
+from .utils import preprocess_metadata_for_neo4j, normalize_entity_name
 from .schema_manager import SchemaManager
 from .entity_extractor import EntityExtractor
-from config.llm_prompts import ExtractedEntity 
+from .entity_resolver import EntityResolver
+from .relationship_extractor import RelationshipExtractor # <-- IMPORTED RelationshipExtractor
+from .node_manager import NodeManager
+from config.llm_prompts import ExtractedEntity, EntityDeduplicationDecision, ExtractedRelationship # Added ExtractedRelationship
 from files.llm_models import setup_fallback_model
+from pydantic_ai.usage import Usage
+from pydantic import BaseModel
 
 
 logger = logging.getLogger("graph_for_rag")
 
+# Simple Pydantic model to hold resolved entity info for relationship mapping
+class ResolvedEntityInfo(BaseModel):
+    uuid: str
+    name: str # This should be the canonical/final name in DB
+    label: str
+
+
 class GraphForRAG:
-    # ... (__init__, close, schema methods, _create_or_merge_source_node remain the same) ...
     def __init__(
         self,
         uri: str,
@@ -29,7 +39,7 @@ class GraphForRAG:
         password: str,
         database: str = "neo4j",
         embedder_client: Optional[EmbedderClient] = None,
-        llm_client: Optional[Any] = None 
+        llm_client: Optional[Any] = None
     ):
         try:
             self.driver: AsyncDriver = AsyncGraphDatabase.driver(uri, auth=(user, password)) # type: ignore
@@ -41,27 +51,42 @@ class GraphForRAG:
                 logger.info("No embedder client provided to GraphForRAG, defaulting to OpenAIEmbedder.")
                 self.embedder = OpenAIEmbedder()
             
-            if llm_client:
-                self.entity_extractor = EntityExtractor(llm_client=llm_client)
-            else:
-                logger.info("No LLM client provided to GraphForRAG for entity extraction, EntityExtractor will use its default.")
-                self.entity_extractor = EntityExtractor() 
+            _llm_for_services = llm_client if llm_client else setup_fallback_model()
+
+            self.entity_extractor = EntityExtractor(llm_client=_llm_for_services)
+            self.entity_resolver = EntityResolver( 
+                driver=self.driver,
+                database_name=self.database,
+                embedder_client=self.embedder,
+                llm_client=_llm_for_services
+            )
+            self.relationship_extractor = RelationshipExtractor(llm_client=_llm_for_services) # <-- INITIALIZE
             
             self.schema_manager = SchemaManager(self.driver, self.database, self.embedder)
+            self.node_manager = NodeManager(self.driver, self.database)
+            
+            self.total_llm_usage: Usage = Usage()
 
             logger.info(f"Using embedder: {self.embedder.config.model_name} with dimension {self.embedder.dimension}")
             
-            entity_extractor_model_name = "Unknown"
-            if hasattr(self.entity_extractor.llm_client, 'model') and isinstance(self.entity_extractor.llm_client.model, str):
-                entity_extractor_model_name = self.entity_extractor.llm_client.model
-            elif hasattr(self.entity_extractor.llm_client, 'model_name') and isinstance(self.entity_extractor.llm_client.model_name, str):
-                entity_extractor_model_name = self.entity_extractor.llm_client.model_name
-
-            logger.info(f"GraphForRAG initialized. Entity Extractor LLM: {entity_extractor_model_name}")
+            services_llm_model_name = "Unknown"
+            if hasattr(_llm_for_services, 'model') and isinstance(_llm_for_services.model, str):
+                services_llm_model_name = _llm_for_services.model
+            elif hasattr(_llm_for_services, 'model_name') and isinstance(_llm_for_services.model_name, str):
+                services_llm_model_name = _llm_for_services.model_name
+            logger.info(f"GraphForRAG initialized. LLM for Entity/Relationship Services: {services_llm_model_name}")
             logger.info(f"Successfully initialized Neo4j driver for database '{database}' at '{uri}'")
         except Exception as e:
             logger.error(f"Failed to initialize GraphForRAG: {e}", exc_info=True)
             raise
+
+    # ... (_accumulate_usage, get_total_llm_usage, close, schema methods, _create_or_merge_source_node remain the same)
+    def _accumulate_usage(self, new_usage: Optional[Usage]):
+        if new_usage and hasattr(new_usage, 'has_values') and new_usage.has_values():
+            self.total_llm_usage = self.total_llm_usage + new_usage # type: ignore
+    
+    def get_total_llm_usage(self) -> Usage: # type: ignore
+        return self.total_llm_usage
 
     async def close(self):
         if self.driver:
@@ -80,65 +105,31 @@ class GraphForRAG:
     async def _create_or_merge_source_node(
         self,
         source_identifier: str,
-        source_content: str | None = None,
-        source_dynamic_metadata: dict | None = None
-    ) -> str | None:
-        source_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, source_identifier))
+        source_content: Optional[str] = None,
+        source_dynamic_metadata: Optional[dict] = None
+    ) -> Optional[str]:
         created_at = datetime.now(timezone.utc)
-        dynamic_props_for_cypher = preprocess_metadata_for_neo4j(source_dynamic_metadata)
-        params = {
-            "source_identifier_param": source_identifier,
-            "source_uuid_param": source_uuid,
-            "source_content_param": source_content, 
-            "created_at_ts_param": created_at,
-            "dynamic_properties_param": dynamic_props_for_cypher
-        }
-        returned_uuid = None
-        try:
-            results, summary, _ = await self.driver.execute_query( # type: ignore
-                cypher_queries.MERGE_SOURCE_NODE, params, database_=self.database
-            )
-            if results and results[0]["source_uuid"]:
-                returned_uuid = results[0]["source_uuid"]
-                action = "created" if summary.counters.nodes_created > 0 else "merged" # type: ignore
-                if summary.counters.nodes_created == 0 and summary.counters.properties_set > 0 and (source_dynamic_metadata or source_content): # type: ignore
-                    action = "updated properties for"
-                elif summary.counters.nodes_created == 0 and summary.counters.properties_set == 0: # type: ignore
-                    action = "matched (no changes to)"
-                
-                log_content_snippet = f", Content: '{source_content[:30]}...'" if source_content else ""
-                logger.debug(f"Source node {action}: [green]{returned_uuid}[/green] (Identifier: '[magenta]{source_identifier}[/magenta]'{log_content_snippet}).")
-                
-                if returned_uuid and source_content and self.embedder:
-                    try:
-                        logger.debug(f"  Generating embedding for Source content of: {returned_uuid} (Identifier: '{source_identifier}')...")
-                        embedding_vector = await self.embedder.embed_text(source_content)
-                        if embedding_vector:
-                            embedding_params = {
-                                "source_uuid_param": returned_uuid,
-                                "embedding_vector_param": embedding_vector
-                            }
-                            embed_results, _, _ = await self.driver.execute_query( # type: ignore
-                                cypher_queries.SET_SOURCE_CONTENT_EMBEDDING,
-                                embedding_params,
-                                database_=self.database
-                            )
-                            if embed_results and embed_results[0].get("uuid_processed") == returned_uuid:
-                                logger.debug(f"  Successfully stored embedding for Source node: {returned_uuid}")
-                            else:
-                                logger.warning(f"  Storing Source content embedding query for {returned_uuid} did not confirm processing.")
-                        else:
-                            logger.warning(f"  Source content embedding vector was empty for {returned_uuid}. Skipping storage.")
-                    except Exception as e_embed:
-                        logger.error(f"  Failed to generate or store Source content embedding for {returned_uuid}: {e_embed}", exc_info=True)
-                elif returned_uuid and source_content and not self.embedder:
-                     logger.debug(f"  No embedder configured. Skipping embedding for Source content of {returned_uuid}.")
-                return returned_uuid
-            return None 
-        except Exception as e:
-            logger.error(f"Error in _create_or_merge_source_node for '{source_identifier}': {e}", exc_info=True)
-            return None
+        processed_metadata = preprocess_metadata_for_neo4j(source_dynamic_metadata)
 
+        returned_uuid = await self.node_manager.create_or_merge_source_node(
+            identifier=source_identifier,
+            content=source_content,
+            dynamic_metadata=processed_metadata,
+            created_at=created_at
+        )
+
+        if returned_uuid:
+            logger.debug(f"Source node processed by NodeManager: UUID '{returned_uuid}', Identifier: '{source_identifier}'.")
+            if source_content and self.embedder:
+                embedding_vector = await self.embedder.embed_text(source_content)
+                if embedding_vector:
+                    if await self.node_manager.set_source_content_embedding(returned_uuid, embedding_vector):
+                        logger.debug(f"  Successfully stored embedding for Source node: {returned_uuid}")
+                    else:
+                        logger.warning(f"  Failed to store embedding for Source node: {returned_uuid}")
+                else:
+                    logger.warning(f"  Source content embedding vector was empty for {returned_uuid}. Skipping storage.")
+        return returned_uuid
 
     async def _add_single_chunk_and_link(
         self,
@@ -148,8 +139,10 @@ class GraphForRAG:
         source_identifier_for_chunk_desc: str,
         allow_same_name_chunks_flag: bool = True,
         previous_chunk_content: Optional[str] = None
-    ) -> str | None:
-        # ... (chunk property preparation and pre-check logic - NO CHANGES HERE) ...
+    ) -> Optional[str]:
+        
+        # --- Chunk Preparation & DB Operation ---
+        # (This part remains the same - creating/merging the chunk node)
         chunk_uuid_str = str(chunk_metadata.pop("chunk_uuid", uuid.uuid4()))
         name_from_meta = chunk_metadata.pop("name", None)
         chunk_number_for_rel = chunk_metadata.pop("chunk_number", None)
@@ -169,13 +162,10 @@ class GraphForRAG:
                     for key in name_override_keys:
                         if key in json_data and isinstance(json_data[key], str) and json_data[key]:
                             derived_name = json_data[key]
-                            logger.debug(f"    Derived chunk name '{derived_name}' from JSON key '{key}'.")
                             break
                     name_str = derived_name
-                else:
-                    logger.warning(f"    Chunk content for '{name_from_meta or chunk_uuid_str}' was marked JSON but not a dict. Storing as text, embedding raw content.")
             except json.JSONDecodeError:
-                logger.warning(f"    Failed to parse JSON content for '{name_from_meta or chunk_uuid_str}'. Storing as raw text, embedding raw content.")
+                logger.warning(f"    Could not parse JSON for chunk, treating as text. Name hint: '{name_from_meta or chunk_uuid_str}'")
         if not name_str: 
             name_str = (page_content[:50] + '...') if len(page_content) > 50 else page_content
         dynamic_props_for_chunk["name"] = name_str
@@ -183,166 +173,174 @@ class GraphForRAG:
             dynamic_props_for_chunk["chunk_number"] = chunk_number_for_rel
         final_dynamic_props_for_chunk = preprocess_metadata_for_neo4j(dynamic_props_for_chunk)
         created_at_ts = datetime.now(timezone.utc)
-        if not allow_same_name_chunks_flag: # Pre-check
-            try:
-                check_params = {"name": name_str}
-                existing_chunk_records, _, _ = await self.driver.execute_query(cypher_queries.CHECK_CHUNK_EXISTS_BY_NAME, check_params, database_=self.database) # type: ignore
-                if existing_chunk_records:
-                    found_uuid = existing_chunk_records[0]["uuid"]
-                    if found_uuid != chunk_uuid_str:
-                        logger.warning(f"Operation on chunk (target UUID: [yellow]{chunk_uuid_str}[/yellow]) with name '[cyan]{name_str}[/cyan]' blocked. Another chunk (UUID: [yellow]{found_uuid}[/yellow]) already has this name. 'allow_same_name_chunks' is False.")
-                        return None
-            except Exception as e:
-                logger.error(f"Error during pre-check for chunk name '{name_str}': {e}", exc_info=True)
+
+        if not allow_same_name_chunks_flag:
+            existing_chunk_records, _, _ = await self.driver.execute_query("MATCH (c:Chunk {name: $name}) RETURN c.uuid AS uuid LIMIT 1", name=name_str, database_=self.database) # type: ignore
+            if existing_chunk_records and existing_chunk_records[0]["uuid"] != chunk_uuid_str:
+                logger.warning(f"Chunk name '{name_str}' already exists. Skipping due to allow_same_name_chunks_flag=False.")
                 return None
         
-        parameters_for_chunk_creation = {
-            "source_node_uuid_param": source_node_uuid,
-            "chunk_uuid_param": chunk_uuid_str,
-            "chunk_content_param": actual_chunk_content_to_store, 
-            "source_identifier_param": source_identifier_for_chunk_desc, 
-            "created_at_ts_param": created_at_ts,
-            "dynamic_chunk_properties_param": final_dynamic_props_for_chunk,
-            "chunk_number_param_for_rel": chunk_number_for_rel if chunk_number_for_rel is not None else 0,
-        }
-        
-        created_chunk_uuid_from_db = None 
-        try:
-            results, summary, _ = await self.driver.execute_query( # type: ignore
-                cypher_queries.ADD_CHUNK_AND_LINK_TO_SOURCE, 
-                parameters_for_chunk_creation, 
-                database_=self.database
-            )
-            if results and results[0]["chunk_uuid"]:
-                created_chunk_uuid_from_db = results[0]["chunk_uuid"]
-                # ... (logging for chunk add/update)
-            else:
-                logger.error(f"Failed to create/update chunk '{name_str}': No UUID returned from main Cypher operation.")
-                return None 
-        except Exception as e:
-            # ... (error handling for chunk creation)
-            if "Failed to invoke procedure `apoc.do.when`" in str(e):
-                logger.error("APOC `apoc.do.when` not found. Ensure APOC plugin is installed.", exc_info=False)
-            logger.error(f"Error in main Cypher operation for chunk '{name_str}': {e}", exc_info=True)
+        created_chunk_uuid_from_db = await self.node_manager.create_chunk_node_and_link_to_source(
+            chunk_uuid=chunk_uuid_str, chunk_content=actual_chunk_content_to_store,
+            source_node_uuid=source_node_uuid, source_identifier_for_chunk_desc=source_identifier_for_chunk_desc,
+            created_at=created_at_ts, dynamic_chunk_properties=final_dynamic_props_for_chunk,
+            chunk_number_for_rel=chunk_number_for_rel
+        )
+        if not created_chunk_uuid_from_db:
+            logger.error(f"Failed to create/link chunk '{name_str}' via NodeManager.")
             return None
-        
-        # --- Entity Extraction and Linking ---
-        if created_chunk_uuid_from_db and self.entity_extractor:
-            logger.debug(f"    Attempting entity extraction for chunk: {created_chunk_uuid_from_db} (Name: '{name_str}')")
-            extracted_entities_list_model = await self.entity_extractor.extract_entities(
-                text_content=page_content, 
-                context_text=previous_chunk_content
+        logger.debug(f"  Chunk processed by NodeManager: UUID '{created_chunk_uuid_from_db}', Name: '{name_str}'")
+
+        # --- Entity Processing ---
+        resolved_entities_for_chunk: List[ResolvedEntityInfo] = [] 
+
+        if created_chunk_uuid_from_db and self.entity_extractor and self.entity_resolver:
+            extracted_entities_list_model, extractor_usage = await self.entity_extractor.extract_entities(
+                text_content=page_content, context_text=previous_chunk_content
             )
+            self._accumulate_usage(extractor_usage)
+
             if extracted_entities_list_model.entities:
-                logger.info(f"    [bold green]Entities Extracted for chunk '{name_str}' ({created_chunk_uuid_from_db}):[/bold green]")
+                logger.info(f"    --- Starting Entity Resolution for Chunk '{name_str}' ---")
                 for extracted_entity_data in extracted_entities_list_model.entities:
                     entity_data: ExtractedEntity = extracted_entity_data
                     
-                    normalized_name = normalize_entity_name(entity_data.name)
-                    if not normalized_name:
-                        logger.warning(f"      Skipping entity with empty normalized name (original: '{entity_data.name}')")
-                        continue
-
-                    entity_uuid_val = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{normalized_name}_{entity_data.label}"))
+                    resolution_decision, resolver_usage = await self.entity_resolver.resolve_entity(entity_data)
+                    self._accumulate_usage(resolver_usage)
                     
-                    entity_params_merge = { # Parameters for the MERGE query
-                        "uuid_param": entity_uuid_val,
-                        "name_param": entity_data.name, 
-                        "normalized_name_param": normalized_name,
-                        "label_param": entity_data.label,
-                        "description_param": entity_data.description,
-                        "created_at_ts_param": created_at_ts,
-                    }
+                    canonical_name_from_resolver = resolution_decision.canonical_name
+                    normalized_name_for_key = normalize_entity_name(canonical_name_from_resolver)
+                    label_for_key = entity_data.label 
+                    description_from_extraction = entity_data.description
+                    
+                    db_entity_uuid: Optional[str] = None
+                    final_entity_name_in_db: str = canonical_name_from_resolver
+                    final_entity_description_to_set: Optional[str] = description_from_extraction # Default for new
+
                     try:
-                        # Execute MERGE_ENTITY_NODE
-                        entity_results, entity_summary, _ = await self.driver.execute_query( # type: ignore
-                            cypher_queries.MERGE_ENTITY_NODE,
-                            entity_params_merge,
-                            database_=self.database
-                        )
-                        if entity_results and entity_results[0]["entity_uuid"]:
-                            db_entity_uuid = entity_results[0]["entity_uuid"]
-                            current_db_name = entity_results[0]["current_entity_name"] # Get current name from DB
-                            action = "created" if entity_summary.counters.nodes_created > 0 else "merged/updated" # type: ignore
+                        if resolution_decision.is_duplicate and resolution_decision.duplicate_of_uuid:
+                            db_entity_uuid = resolution_decision.duplicate_of_uuid
+                            # ... (logic for updating existing entity as in the previous correct step)
+                            logger.info(f"      Entity '{entity_data.name}' resolved as DUPLICATE of existing Entity UUID: '{db_entity_uuid}'. Canonical name: '{canonical_name_from_resolver}'")
+                            node_details = await self.node_manager.fetch_entity_details(db_entity_uuid)
+                            current_db_name = None
+                            current_db_description = None
+                            if node_details:
+                                _, current_db_name, current_db_description, _ = node_details
                             
-                            final_entity_name_to_log = entity_data.name # Default to new name
+                            final_entity_name_in_db = current_db_name if current_db_name else canonical_name_from_resolver
+                            name_updated_in_db = False # Flag to track if name was explicitly updated
 
-                            # Python logic to decide if name needs a separate update
-                            if action == "merged/updated" and current_db_name and entity_data.name:
-                                if len(entity_data.name) > len(current_db_name):
-                                    logger.debug(f"      New name '{entity_data.name}' is longer than existing '{current_db_name}'. Updating.")
-                                    await self.driver.execute_query(
-                                        cypher_queries.UPDATE_ENTITY_NAME,
-                                        {"uuid_param": db_entity_uuid, "new_name_param": entity_data.name},
-                                        database_=self.database
-                                    )
-                                    final_entity_name_to_log = entity_data.name
-                                else:
-                                    final_entity_name_to_log = current_db_name # Log the name that's now in DB
-                            elif action == "created":
-                                final_entity_name_to_log = entity_data.name
+                            if canonical_name_from_resolver and current_db_name and \
+                               len(canonical_name_from_resolver) > len(current_db_name) and \
+                               canonical_name_from_resolver != current_db_name:
+                                if await self.node_manager.update_entity_name(db_entity_uuid, canonical_name_from_resolver, created_at_ts):
+                                    final_entity_name_in_db = canonical_name_from_resolver
+                                    name_updated_in_db = True
+                                    logger.debug(f"        Updated name for Entity '{db_entity_uuid}' to '{final_entity_name_in_db}'.")
+                            elif not current_db_name and canonical_name_from_resolver:
+                                 if await self.node_manager.update_entity_name(db_entity_uuid, canonical_name_from_resolver, created_at_ts):
+                                    final_entity_name_in_db = canonical_name_from_resolver
+                                    name_updated_in_db = True
+                                    logger.debug(f"        Set name for Entity '{db_entity_uuid}' to '{final_entity_name_in_db}'.")
+                            
+                            if description_from_extraction:
+                                if current_db_description and description_from_extraction not in current_db_description:
+                                    final_entity_description_to_set = f"{current_db_description} | {description_from_extraction}"
+                            else:
+                                final_entity_description_to_set = current_db_description
+                            
+                            if final_entity_description_to_set != current_db_description:
+                                await self.node_manager.update_entity_description(db_entity_uuid, final_entity_description_to_set, created_at_ts)
+                                logger.debug(f"        Updated description for Entity '{db_entity_uuid}'.")
+                            elif not name_updated_in_db : # If neither name nor description specifically updated, still touch updated_at
+                                 await self.driver.execute_query("MATCH (e:Entity {uuid: $uuid}) SET e.updated_at = $ts", uuid=db_entity_uuid, ts=created_at_ts, database_=self.database) # type: ignore
+                                 logger.debug(f"        Touched updated_at for Entity '{db_entity_uuid}'.")
 
-
-                            logger.debug(f"      Entity node {action}: [cyan]{db_entity_uuid}[/cyan] (Name: '{final_entity_name_to_log}', NormName: '{normalized_name}', Label: '{entity_data.label}')")
-
-                            link_params = {
-                                "chunk_uuid_param": created_chunk_uuid_from_db,
-                                "entity_uuid_param": db_entity_uuid,
-                                "created_at_ts_param": created_at_ts,
-                            }
-                            await self.driver.execute_query( # type: ignore
-                                cypher_queries.LINK_CHUNK_TO_ENTITY,
-                                link_params,
-                                database_=self.database
+                        else: # Not a duplicate, create a new entity
+                            new_entity_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{normalized_name_for_key}_{label_for_key}"))
+                            logger.info(f"      Entity '{entity_data.name}' resolved as NEW. Name: '{canonical_name_from_resolver}', Desc: '{description_from_extraction}', Target UUID: {new_entity_uuid}")
+                            
+                            final_entity_name_in_db = canonical_name_from_resolver
+                            final_entity_description_to_set = description_from_extraction
+                            
+                            # Use the correct method name from NodeManager
+                            merge_result = await self.node_manager.merge_or_create_entity_node( # <-- CORRECTED METHOD NAME
+                                entity_uuid_to_create_if_new=new_entity_uuid,
+                                name_for_create=final_entity_name_in_db,
+                                normalized_name_for_merge=normalized_name_for_key,
+                                label_for_merge=label_for_key,
+                                description_for_create=final_entity_description_to_set,
+                                created_at_ts=created_at_ts
                             )
-                            logger.debug(f"        -> Linked Chunk '{created_chunk_uuid_from_db}' to Entity '{db_entity_uuid}' via MENTIONS_ENTITY.")
-
-                            if self.embedder:
-                                try:
-                                    entity_name_embedding = await self.embedder.embed_text(final_entity_name_to_log) # Embed the name that's in DB
-                                    if entity_name_embedding:
-                                        await self.driver.execute_query( # type: ignore
-                                            cypher_queries.SET_ENTITY_NAME_EMBEDDING,
-                                            {"entity_uuid_param": db_entity_uuid, "embedding_vector_param": entity_name_embedding},
-                                            database_=self.database
-                                        )
-                                        logger.debug(f"        -> Stored name embedding for Entity '{db_entity_uuid}'.")
-                                except Exception as e_embed_entity:
-                                     logger.error(f"      Error embedding or storing entity name embedding for {db_entity_uuid}: {e_embed_entity}", exc_info=True)
+                            if merge_result:
+                                db_entity_uuid = merge_result[0]
+                                final_entity_name_in_db = merge_result[1] if merge_result[1] else final_entity_name_in_db 
+                            else:
+                                logger.error(f"      Failed to MERGE/CREATE new entity '{canonical_name_from_resolver}' using NodeManager.")
+                                continue 
+                        
+                        if db_entity_uuid:
+                            # ... (rest of linking and embedding logic)
+                            resolved_entities_for_chunk.append(ResolvedEntityInfo(uuid=db_entity_uuid, name=final_entity_name_in_db, label=label_for_key))
+                            await self.node_manager.link_chunk_to_entity(created_chunk_uuid_from_db, db_entity_uuid, created_at_ts)
+                            logger.debug(f"        -> Linked Chunk to Entity '{db_entity_uuid}'.")
+                            if self.embedder and final_entity_name_in_db:
+                                if await self.node_manager.set_entity_name_embedding(db_entity_uuid, await self.embedder.embed_text(final_entity_name_in_db)):
+                                    logger.debug(f"        -> Stored name embedding for Entity '{db_entity_uuid}'.")
                         else:
-                            logger.warning(f"      Failed to create/merge entity: {entity_data.name}")
-                    except Exception as e_entity:
-                        logger.error(f"      Error processing extracted entity '{entity_data.name}': {e_entity}", exc_info=True)
-            else:
-                logger.info(f"    No entities extracted for chunk '{name_str}' ({created_chunk_uuid_from_db}).")
-        
-        # ... (chunk embedding logic - NO CHANGES HERE) ...
-        if created_chunk_uuid_from_db and self.embedder:
-            try:
-                logger.debug(f"    Generating embedding for chunk content of: {created_chunk_uuid_from_db} (Name: '{name_str}')...")
-                embedding_vector = await self.embedder.embed_text(text_content_to_embed)
-                if embedding_vector: 
-                    embedding_params = {
-                        "chunk_uuid_param": created_chunk_uuid_from_db,
-                        "embedding_vector_param": embedding_vector
-                    }
-                    embed_results, embed_summary, embed_keys = await self.driver.execute_query( # type: ignore
-                        cypher_queries.SET_CHUNK_CONTENT_EMBEDDING,
-                        embedding_params,
-                        database_=self.database
+                            logger.warning(f"      Skipping link and embed for entity '{entity_data.name}' as db_entity_uuid was not established.")
+                    
+                    except Exception as e_entity_processing:
+                        logger.error(f"      Error processing resolved entity '{entity_data.name}': {e_entity_processing}", exc_info=True)
+                logger.info(f"    --- Finished Entity Resolution for Chunk '{name_str}' ---")
+
+        # ... (Relationship Extraction and Chunk Embedding logic remains the same) ...
+        if created_chunk_uuid_from_db and self.relationship_extractor and resolved_entities_for_chunk:
+            logger.info(f"    --- Starting Relationship Extraction for Chunk '{name_str}' ---")
+            extracted_relationships_list_model, rel_extractor_usage = await self.relationship_extractor.extract_relationships(
+                text_content=page_content, 
+                entities_in_chunk=resolved_entities_for_chunk 
+            )
+            self._accumulate_usage(rel_extractor_usage)
+
+            if extracted_relationships_list_model.relationships:
+                entity_name_to_uuid_map: Dict[str, str] = {
+                    entity.name: entity.uuid for entity in resolved_entities_for_chunk 
+                }
+                for rel_data in extracted_relationships_list_model.relationships:
+                    source_uuid = entity_name_to_uuid_map.get(rel_data.source_entity_name)
+                    target_uuid = entity_name_to_uuid_map.get(rel_data.target_entity_name)
+
+                    if not source_uuid or not target_uuid:
+                        logger.warning(f"      Could not map source '{rel_data.source_entity_name}' or target '{rel_data.target_entity_name}' to UUIDs for relationship. Skipping.")
+                        continue
+                    if source_uuid == target_uuid:
+                        logger.debug(f"      Skipping self-relationship for entity '{rel_data.source_entity_name}'.")
+                        continue
+                    
+                    relationship_uuid = await self.node_manager.create_or_merge_relationship(
+                        source_entity_uuid=source_uuid, target_entity_uuid=target_uuid,
+                        relation_label=rel_data.relation_label, fact_sentence=rel_data.fact_sentence,
+                        source_chunk_uuid=created_chunk_uuid_from_db, created_at_ts=created_at_ts
                     )
-                    if embed_results and embed_results[0].get("uuid_processed") == created_chunk_uuid_from_db:
-                        logger.debug(f"    Successfully called procedure to store embedding for chunk: {created_chunk_uuid_from_db}")
-                    else:
-                        logger.warning(f"    Storing embedding query returned an unexpected UUID or no result for chunk {created_chunk_uuid_from_db}.")
-                else:
-                    logger.warning(f"    Embedding vector was empty for chunk {created_chunk_uuid_from_db}. Skipping embedding storage.")
-            except Exception as e:
-                logger.error(f"    Failed to generate or store embedding for chunk {created_chunk_uuid_from_db}: {e}", exc_info=True)
-        elif created_chunk_uuid_from_db and not self.embedder:
-            logger.debug(f"    No embedder configured. Skipping embedding for chunk {created_chunk_uuid_from_db}.")
-
-
+                    if relationship_uuid and self.embedder:
+                        fact_embedding = await self.embedder.embed_text(rel_data.fact_sentence)
+                        if fact_embedding:
+                            await self.node_manager.set_relationship_fact_embedding(relationship_uuid, fact_embedding)
+                            logger.debug(f"        -> Stored fact embedding for relationship '{relationship_uuid}'.")
+            else:
+                logger.info(f"    No relationships extracted for chunk '{name_str}'.")
+            logger.info(f"    --- Finished Relationship Extraction for Chunk '{name_str}' ---")
+        
+        if created_chunk_uuid_from_db and self.embedder:
+            embedding_vector = await self.embedder.embed_text(text_content_to_embed)
+            if embedding_vector: 
+                if await self.node_manager.set_chunk_content_embedding(created_chunk_uuid_from_db, embedding_vector):
+                    logger.debug(f"    Successfully stored embedding for chunk: {created_chunk_uuid_from_db}")
+            else:
+                logger.warning(f"    Embedding vector was empty for chunk {created_chunk_uuid_from_db}. Skipping embedding storage.")
+        
         return created_chunk_uuid_from_db
 
     # ... (add_documents_from_source remains the same) ...

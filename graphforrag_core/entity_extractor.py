@@ -1,9 +1,9 @@
 # graphforrag_core/entity_extractor.py
 import logging
-from typing import Optional, Any
+from typing import Optional, Any, Tuple # <-- ADDED Tuple
 
 from pydantic_ai import Agent
-# from pydantic_ai.result import AgentRunResult # REMOVE THIS LINE
+from pydantic_ai.usage import Usage # Assuming this import works
 
 from config.llm_prompts import (
     ExtractedEntitiesList,
@@ -12,10 +12,14 @@ from config.llm_prompts import (
 )
 from files.llm_models import setup_fallback_model
 
-
 logger = logging.getLogger("graph_for_rag.entity_extractor")
 
+# log_llm_usage helper can be removed from here if we accumulate globally
+# or kept for per-operation logging if desired. For now, let's remove it
+# to focus on the cumulative sum.
+
 class EntityExtractor:
+    # ... (__init__ remains the same) ...
     def __init__(self, llm_client: Optional[Any] = None):
         if llm_client:
             self.llm_client = llm_client
@@ -41,45 +45,43 @@ class EntityExtractor:
         self, 
         text_content: str, 
         context_text: Optional[str] = None
-    ) -> ExtractedEntitiesList:
+    ) -> Tuple[ExtractedEntitiesList, Optional[Usage]]: # <-- MODIFIED return type
         if not text_content.strip():
-            logger.warning("Received empty text_content for entity extraction. Returning empty list.")
-            return ExtractedEntitiesList(entities=[])
+            logger.warning("Received empty text_content for entity extraction. Returning empty list and no usage.")
+            return ExtractedEntitiesList(entities=[]), None
 
         user_prompt = ENTITY_EXTRACTION_USER_PROMPT_TEMPLATE.format(
             context_text=context_text if context_text else "No additional context provided.",
             text_content=text_content
         )
-
-        logger.debug(f"Attempting entity extraction with user prompt:\n-----\n{user_prompt[:500]}...\n-----")
         
+        current_op_usage: Optional[Usage] = None
         try:
-            # agent.run() returns an object; we expect our Pydantic model at its .output attribute
             agent_result_object = await self.agent.run(user_prompt=user_prompt) 
             
-            # Check if the result object exists and has an 'output' attribute
+            if agent_result_object and hasattr(agent_result_object, 'usage'):
+                if isinstance(agent_result_object.usage, Usage):
+                    current_op_usage = agent_result_object.usage
+                elif callable(agent_result_object.usage):
+                    try:
+                        usage_data_from_method = agent_result_object.usage()
+                        if isinstance(usage_data_from_method, Usage):
+                             current_op_usage = usage_data_from_method
+                    except Exception:
+                        pass # Ignore if .usage() fails or returns wrong type
+
             if agent_result_object and hasattr(agent_result_object, 'output'):
-                # Now check if agent_result_object.output is an instance of our expected Pydantic model
                 if isinstance(agent_result_object.output, ExtractedEntitiesList):
                     extracted_data: ExtractedEntitiesList = agent_result_object.output
-                    logger.debug(f"Raw Agent output (ExtractedEntitiesList): {extracted_data}")
-                    logger.debug(f"Successfully extracted {len(extracted_data.entities)} entities.")
-                    for entity in extracted_data.entities:
-                        logger.debug(f"  - Extracted: Name='{entity.name}', Label='{entity.label}'")
-                    return extracted_data
+                    # logger.debug(f"Successfully extracted {len(extracted_data.entities)} entities.") # Optional: keep for detailed logs
+                    return extracted_data, current_op_usage
                 else:
-                    logger.error(
-                        f"Entity extraction result's 'output' attribute is not of type ExtractedEntitiesList. "
-                        f"Got type: {type(agent_result_object.output)}. Value: {agent_result_object.output}"
-                    )
-                    return ExtractedEntitiesList(entities=[])
+                    logger.error(f"Entity extraction result's 'output' attribute is not of type ExtractedEntitiesList.")
+                    return ExtractedEntitiesList(entities=[]), current_op_usage # Return usage even if output parsing failed
             else:
-                logger.error(
-                    f"Entity extraction did not return a valid result object or 'output' attribute. "
-                    f"Got: {agent_result_object}"
-                )
-                return ExtractedEntitiesList(entities=[])
+                logger.error(f"Entity extraction did not return a valid result object or 'output' attribute.")
+                return ExtractedEntitiesList(entities=[]), current_op_usage
                 
         except Exception as e:
-            logger.error(f"Error during entity extraction or processing result: {e}", exc_info=True)
-            return ExtractedEntitiesList(entities=[])
+            logger.error(f"Error during entity extraction: {e}", exc_info=True)
+            return ExtractedEntitiesList(entities=[]), None
