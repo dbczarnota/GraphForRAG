@@ -235,6 +235,7 @@ source_data_sets = [
     {
         "identifier": SOURCE_1_IDENTIFIER,
         "source_metadata": SOURCE_1_METADATA,
+        "source_content": "This is a summary or main content for Source A itself. It describes the overall theme of the narrative text contained in its chunks.",
         "documents": project_phoenix_documents
     },
     {
@@ -245,6 +246,7 @@ source_data_sets = [
     {
         "identifier": SOURCE_3_IDENTIFIER,
         "source_metadata": SOURCE_3_METADATA,
+        "source_content": "This source contains a catalog of electronic widgets and gadgets. Each product is detailed in its respective chunk.", # <-- ADDED
         "documents": product_feed_documents
     }
 ]
