@@ -1,6 +1,6 @@
 # config/llm_prompts.py
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any # Added Dict, Any
+from typing import List, Optional, Dict, Any # Added Dict
 
 # --- Pydantic Models for LLM Output (Entity Extraction) ---
 class ExtractedEntity(BaseModel):
@@ -33,7 +33,6 @@ class ExtractedRelationship(BaseModel):
     target_entity_name: str = Field(..., description="The name of the target entity in the relationship (must exactly match one of the provided entity names).")
     relation_label: str = Field(..., description="A concise label for the relationship in SCREAMING_SNAKE_CASE (e.g., WORKS_FOR, LOCATED_IN, INTERACTED_WITH, USES_ITEM).")
     fact_sentence: str = Field(..., description="A complete natural language sentence clearly stating the relationship between the source and target entity, derived directly from the text. Max 30 words.")
-    # Optional: We could add confidence scores or temporal info later if needed.
 
 class ExtractedRelationshipsList(BaseModel):
     """
@@ -43,25 +42,25 @@ class ExtractedRelationshipsList(BaseModel):
 
 
 # --- Prompt Templates for Entity Extraction ---
-# ... (ENTITY_EXTRACTION_SYSTEM_PROMPT and ENTITY_EXTRACTION_USER_PROMPT_TEMPLATE remain the same) ...
 ENTITY_EXTRACTION_SYSTEM_PROMPT = """
 You are an expert AI assistant tasked with identifying and extracting named entities from the provided text.
-Your goal is to identify distinct real-world objects, concepts, persons, organizations, locations, products, etc., and represent them consistently.
+Your goal is to identify distinct real-world objects, concepts that are treated as subjects/objects, persons, organizations, locations, products, etc., and represent them consistently.
 
 Guidelines:
-- Focus on extracting nouns or noun phrases that represent distinct entities.
+- Focus on extracting nouns or noun phrases that represent distinct, tangible or clearly defined conceptual entities.
 - For each entity, provide the most complete and canonical name possible based on the information in the CURRENT TEXT. For example, if "Mr. John Smith" and "Smith" refer to the same person in the text, use "John Smith". If only "Pooh" is mentioned, use "Pooh", but if "Winnie-the-Pooh" is mentioned, prefer that.
 - If an entity is mentioned multiple times in the CURRENT TEXT, extract it only ONCE using its most representative or complete name.
 - For the 'label', assign a general category (e.g., Person, Organization, Location, Product, Concept, Event, Artwork, Miscellaneous). Start with broad categories. Consistency in labeling for the same entity across different mentions is important if discernible.
 - If possible, provide a brief contextual description for the entity based *only* on the provided CURRENT TEXT. This description MUST be a single sentence and ideally no more than 20 words. If the entity is mentioned multiple times, synthesize this brief, single-sentence description.
-- Do NOT extract attributes of entities as separate entities (e.g., for "blue car", extract "car" as an entity, not "blue").
-- Do NOT extract actions or verbs as entities.
-- If the text is short and contains no clear entities, you can return an empty list.
+- Do NOT extract attributes of entities as separate entities (e.g., for "blue car", extract "car" as an entity, not "blue" as an entity). Qualities like "speed", "demanding tasks", "resolution", "color accuracy", "refresh rate" are generally attributes or characteristics of other entities, not standalone entities themselves, unless the text treats them as a distinct subject or object of discussion.
+- Do NOT extract general activities, processes, or verbs as entities unless they are nominalized and treated as distinct concepts in the text (e.g., "The Investigation" if it's a formal named investigation).
+- Prioritize concrete entities over highly abstract or overly general concepts unless the text gives them significant focus as standalone items. For example, "customer support response times" is a metric or concept, likely not a distinct entity node on its own unless it's the central subject of a detailed discussion.
+- If the text is short and contains no clear entities fitting these criteria, you can return an empty list.
 """
 
 ENTITY_EXTRACTION_USER_PROMPT_TEMPLATE = """
 Please extract all distinct entities from the following text content.
-If contextual information from previous turns/chunks is provided, use it to help disambiguate or understand the current text, but primarily focus on extracting entities explicitly mentioned or clearly implied in the CURRENT TEXT.
+If contextual information from previous turns/chunks is provided, use it to help disambiguate or understand the current text, but primarily focus on extracting entities explicitly mentioned or clearly implied in the CURRENT TEXT, adhering to the guidelines.
 
 CONTEXT (Optional, from previous text or related documents):
 {context_text}
@@ -71,7 +70,6 @@ CURRENT TEXT to extract entities from:
 """
 
 # --- Prompt Templates for Entity Deduplication ---
-# ... (ENTITY_DEDUPLICATION_SYSTEM_PROMPT and ENTITY_DEDUPLICATION_USER_PROMPT_TEMPLATE remain the same) ...
 ENTITY_DEDUPLICATION_SYSTEM_PROMPT = """
 You are an expert AI assistant specializing in entity resolution and deduplication.
 Your task is to determine if a "New Entity" is a duplicate of any "Existing Entity Candidates" provided.
@@ -125,7 +123,7 @@ IDENTIFIED ENTITIES (from the CURRENT TEXT):
 {{!-- Each entity in the JSON string above is an object with "name" and "label" --}}
 
 Task:
-Identify and extract all clear, factual, and directional relationships between pairs of entities from the "IDENTIFIED ENTITIES" list that are explicitly stated or strongly implied in the "CURRENT TEXT".
+Identify and extract all clear, factual, and directional relationships **strictly between pairs of entities listed in "IDENTIFIED ENTITIES"**.
 
 For each relationship, provide:
 1.  `source_entity_name`: The exact name of the source entity from the "IDENTIFIED ENTITIES" list.
@@ -134,11 +132,12 @@ For each relationship, provide:
 4.  `fact_sentence`: A complete, natural language sentence, ideally 30 words or less, that clearly states the relationship between the source and target entity. This sentence should be directly derivable from the "CURRENT TEXT". For example: "Winnie-the-Pooh ate a jar of honey." or "Rabbit owns the house where Pooh got stuck."
 
 Guidelines:
-- Only extract relationships between entities present in the "IDENTIFIED ENTITIES" list.
-- Ensure `source_entity_name` and `target_entity_name` exactly match names from the provided list.
+- Only extract relationships where **both the source and target entities are explicitly present by name in the "IDENTIFIED ENTITIES" list provided above.**
+- Ensure `source_entity_name` and `target_entity_name` **exactly match** names from the provided "IDENTIFIED ENTITIES" list.
+- Do NOT invent entities or use concepts as targets/sources if they are not in the "IDENTIFIED ENTITIES" list. For example, if "Speed" or "Demanding Tasks" are not in the list, do not use them as a source or target.
 - Relationships should be directional (source -> target).
 - Do not extract attributes of a single entity as a relationship (e.g., "Pooh is a bear" is an attribute/classification, not a relationship between two distinct entities from the provided list unless "Bear" itself was also an identified entity).
 - Avoid overly generic labels like "RELATED_TO" if a more specific one applies.
 - If multiple sentences in the text describe the same core relationship between the same two entities, synthesize it into one representative `fact_sentence` and a single `relation_label`.
-- If no clear relationships between the provided entities are found in the text, return an empty list for "relationships".
+- If no clear relationships meeting these strict criteria are found in the text, return an empty list for "relationships".
 """
