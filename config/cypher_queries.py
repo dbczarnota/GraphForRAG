@@ -1,7 +1,19 @@
 # config/cypher_queries.py
 
-# --- Node and Relationship Creation/Update Queries ---
+# --- Constants for Schema Management --
+EXCLUDED_PROPERTIES_FOR_DYNAMIC_BTREE = [
+    'uuid', 'name', 'content', 'content_embedding', 'created_at', 
+    'source_description', 'chunk_number', 'processed_at', 
+    'entity_count', 'relationship_count',
+    'normalized_name', 'label', 'description', 'name_embedding', 'description_embedding' # Added entity specific fields
+]
 
+SUITABLE_BTREE_TYPES = [
+    "STRING", "INTEGER", "FLOAT", "BOOLEAN", 
+    "DATE", "DATETIME", "LOCAL_DATETIME", "TIME", "LOCAL_TIME"
+]
+
+# --- Node and Relationship Creation/Update Queries ---
 MERGE_SOURCE_NODE = """
 MERGE (source:Source {name: $source_identifier_param})
 ON CREATE SET
@@ -175,6 +187,107 @@ CALL db.create.setRelationshipVectorProperty(r, 'fact_embedding', $embedding_vec
 RETURN $relationship_uuid_param AS uuid_processed
 """
 
+SET_ENTITY_DESCRIPTION_EMBEDDING = """
+MATCH (e:Entity {uuid: $entity_uuid_param})
+CALL db.create.setNodeVectorProperty(e, 'description_embedding', $embedding_vector_param)
+RETURN $entity_uuid_param AS uuid_processed
+"""
+
+SEARCH_CHUNKS_BY_KEYWORD_FULLTEXT = """
+CALL db.index.fulltext.queryNodes($index_name, $query_string, {limit: $limit_param})
+YIELD node, score
+WHERE node:Chunk // Ensure the node is indeed a Chunk
+RETURN node.uuid AS uuid, 
+       node.name AS name, 
+       node.content AS content, 
+       node.source_description AS source_description, 
+       node.chunk_number AS chunk_number,
+       score
+ORDER BY score DESC
+LIMIT $limit_param
+"""
+
+SEARCH_CHUNKS_BY_SIMILARITY_VECTOR = """
+CALL db.index.vector.queryNodes($index_name_param, $top_k_param, $embedding_vector_param)
+YIELD node, score
+WHERE node:Chunk AND score >= $min_similarity_score_param // Ensure it's a Chunk and meets min score
+RETURN node.uuid AS uuid,
+       node.name AS name,
+       node.content AS content,
+       node.source_description AS source_description,
+       node.chunk_number AS chunk_number,
+       score
+ORDER BY score DESC
+LIMIT $top_k_param // Re-apply limit after WHERE clause for safety, though queryNodes limit should suffice
+"""
+
+SEARCH_ENTITIES_BY_KEYWORD_FULLTEXT = """
+CALL db.index.fulltext.queryNodes($index_name, $query_string, {limit: $limit_param})
+YIELD node, score
+WHERE node:Entity // Ensure the node is indeed an Entity
+RETURN node.uuid AS uuid,
+       node.name AS name,
+       node.label AS label, // Or labels(node) if you store multiple
+       node.description AS description,
+       score
+ORDER BY score DESC
+LIMIT $limit_param
+"""
+
+SEARCH_ENTITIES_BY_SIMILARITY_VECTOR = """
+CALL db.index.vector.queryNodes($index_name_param, $top_k_param, $embedding_vector_param)
+YIELD node, score
+WHERE node:Entity AND score >= $min_similarity_score_param // Ensure it's an Entity and meets min score
+RETURN node.uuid AS uuid,
+       node.name AS name,
+       node.label AS label, // Or labels(node)
+       node.description AS description,
+       score
+ORDER BY score DESC
+LIMIT $top_k_param
+"""
+SEARCH_ENTITIES_BY_DESCRIPTION_SIMILARITY_VECTOR = """
+CALL db.index.vector.queryNodes($index_name_param, $top_k_param, $embedding_vector_param)
+YIELD node, score
+WHERE node:Entity AND score >= $min_similarity_score_param // Ensure it's an Entity and meets min score
+RETURN node.uuid AS uuid,
+       node.name AS name,
+       node.label AS label, 
+       node.description AS description,
+       score
+ORDER BY score DESC
+LIMIT $top_k_param
+"""
+SEARCH_RELATIONSHIPS_BY_KEYWORD_FULLTEXT = """
+CALL db.index.fulltext.queryRelationships($index_name, $query_string, {limit: $limit_param})
+YIELD relationship, score // 'relationship' is the raw relationship object from the index
+MATCH (s)-[r:RELATES_TO]->(t) // Match explicitly to get source (s) and target (t) nodes
+WHERE elementId(r) = elementId(relationship) // Ensure we are working with the same relationship
+RETURN r.uuid AS uuid,
+       r.relation_label AS name, 
+       r.fact_sentence AS fact_sentence,
+       s.uuid AS source_entity_uuid,
+       t.uuid AS target_entity_uuid,
+       score
+ORDER BY score DESC
+LIMIT $limit_param 
+"""
+
+SEARCH_RELATIONSHIPS_BY_SIMILARITY_VECTOR = """
+CALL db.index.vector.queryRelationships($index_name_param, $top_k_param, $embedding_vector_param)
+YIELD relationship, score // 'relationship' is the raw relationship object from the index
+MATCH (s)-[r:RELATES_TO]->(t) // Match explicitly to get source (s) and target (t) nodes
+WHERE elementId(r) = elementId(relationship) AND score >= $min_similarity_score_param // Ensure same rel and score threshold
+RETURN r.uuid AS uuid,
+       r.relation_label AS name, 
+       r.fact_sentence AS fact_sentence,
+       s.uuid AS source_entity_uuid,
+       t.uuid AS target_entity_uuid,
+       score
+ORDER BY score DESC
+LIMIT $top_k_param 
+"""
+
 
 # Constraints (implicitly create indexes)
 CREATE_CONSTRAINT_CHUNK_UUID = "CREATE CONSTRAINT chunk_uuid IF NOT EXISTS FOR (c:Chunk) REQUIRE c.uuid IS UNIQUE"
@@ -195,7 +308,10 @@ CREATE_INDEX_RELATIONSHIP_LABEL = "CREATE INDEX relationship_label_idx IF NOT EX
 CREATE_FULLTEXT_CHUNK_CONTENT = "CREATE FULLTEXT INDEX chunk_content_ft IF NOT EXISTS FOR (c:Chunk) ON EACH [c.content, c.name]"
 CREATE_FULLTEXT_SOURCE_CONTENT = "CREATE FULLTEXT INDEX source_content_ft IF NOT EXISTS FOR (s:Source) ON EACH [s.content, s.name]" # <-- ADDED
 CREATE_FULLTEXT_ENTITY_NAME_DESC = "CREATE FULLTEXT INDEX entity_name_desc_ft IF NOT EXISTS FOR (e:Entity) ON EACH [e.name, e.description]"
-
+CREATE_FULLTEXT_RELATIONSHIP_FACT = """
+CREATE FULLTEXT INDEX relationship_fact_ft IF NOT EXISTS 
+FOR ()-[r:RELATES_TO]-() ON EACH [r.relation_label, r.fact_sentence]
+""" # Index on label and fact
 
 # Vector Indexes (Dynamically formatted in Python)
 # Template for vector index creation for Chunk content_embedding
@@ -236,13 +352,10 @@ DROP_FULLTEXT_ENTITY_NAME_DESC = "DROP INDEX entity_name_desc_ft IF EXISTS"
 DROP_FULLTEXT_CHUNK_CONTENT = "DROP INDEX chunk_content_ft IF EXISTS" 
 DROP_FULLTEXT_SOURCE_CONTENT = "DROP INDEX source_content_ft IF EXISTS" 
 # Query to get distinct property keys for a given node label (Fallback if APOC not available)
-GET_DISTINCT_PROPERTY_KEYS_FOR_LABEL_FALLBACK = """
-MATCH (n:$node_label_param)
-UNWIND keys(n) AS key
-WITH DISTINCT key
-WHERE NOT key IN ['uuid', 'name', 'content', 'content_embedding', 'created_at', 
-                  'source_description', 'chunk_number', 'processed_at', 
-                  'entity_count', 'relationship_count', 
-                  'normalized_name', 'label', 'description'] // Added entity specific fields to exclude
+# Fallback query template. The {node_label_placeholder} will be replaced in Python.
+GET_DISTINCT_PROPERTY_KEYS_FOR_LABEL_FALLBACK_TEMPLATE = """
+MATCH (n:{node_label_placeholder}) 
+UNWIND keys(properties(n)) AS key
+WITH DISTINCT key WHERE NOT key IN $excluded_props_param 
 RETURN key
 """
