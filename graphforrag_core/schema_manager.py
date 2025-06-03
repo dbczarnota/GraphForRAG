@@ -17,7 +17,6 @@ class SchemaManager:
         logger.debug(f"Fetching dynamic properties for B-Tree indexing on label: {node_label}")
         properties_to_index: list[str] = []
         try:
-            # Parameterized query for APOC (this part is fine as corrected before)
             query_string_get_props_with_apoc = """ 
             CALL apoc.meta.schema() YIELD value
             UNWIND value AS node_meta
@@ -41,10 +40,6 @@ class SchemaManager:
                "No function with name `apoc.meta.schema`" in str(e):
                 logger.warning(f"APOC procedure 'apoc.meta.schema' not found. Falling back for label '{node_label}'.")
                 
-                # Dynamically construct the fallback query for the label part
-                # Sanitize node_label if it could ever come from untrusted input,
-                # but here it's internally controlled ("Chunk", "Source", "Entity").
-                # A simple check for valid characters might be good practice anyway.
                 if not re.match(r"^[A-Za-z0-9_]+$", node_label):
                     logger.error(f"Invalid node_label format for fallback query: {node_label}")
                     return []
@@ -64,7 +59,6 @@ class SchemaManager:
                 logger.error(f"Error fetching dynamic property keys using APOC for label '{node_label}': {e}", exc_info=True)
         return properties_to_index
 
-    # ... rest of the SchemaManager class remains the same as in the previous full code block ...
     async def ensure_indices_and_constraints(self):
         logger.info("Ensuring database indices and constraints...")
         
@@ -80,7 +74,7 @@ class SchemaManager:
             (cypher_queries.CREATE_INDEX_ENTITY_LABEL, {}),
             (cypher_queries.CREATE_INDEX_ENTITY_NORMALIZED_NAME_LABEL, {}),
             (cypher_queries.CREATE_FULLTEXT_CHUNK_CONTENT, {}),
-            (cypher_queries.CREATE_FULLTEXT_SOURCE_CONTENT, {}),
+            (cypher_queries.CREATE_FULLTEXT_SOURCE_CONTENT, {}), # <-- ENSURED THIS IS PRESENT
             (cypher_queries.CREATE_FULLTEXT_ENTITY_NAME_DESC, {}),
             (cypher_queries.CREATE_INDEX_RELATIONSHIP_LABEL, {}),
             (cypher_queries.CREATE_FULLTEXT_RELATIONSHIP_FACT, {}),
@@ -96,11 +90,11 @@ class SchemaManager:
 
         source_node_label = "Source"
         source_property_name = "content_embedding"
-        source_vector_index_name = f"{source_node_label.lower()}_{source_property_name}_vector"
+        source_vector_index_name = f"{source_node_label.lower()}_{source_property_name}_vector" # Corrected name
         create_vector_index_source_query = cypher_queries.CREATE_VECTOR_INDEX_TEMPLATE.replace(
             "$index_name", source_vector_index_name
         ).replace("$node_label", source_node_label).replace("$property_name", source_property_name).replace("$dimension", str(self.embedder.dimension)).replace("$similarity_function", "cosine")
-        static_queries_and_params.append((create_vector_index_source_query, {}))
+        static_queries_and_params.append((create_vector_index_source_query, {})) # <-- ENSURED THIS IS PRESENT AND CORRECT
 
         entity_node_label = "Entity"
         entity_name_property = "name_embedding"
@@ -143,16 +137,16 @@ class SchemaManager:
                 logger.debug(f"Prepared dynamic index query for {node_label} on property '{prop_key}' with name '{index_name}'")
 
         async with self.driver.session(database=self.database) as session:
-            for query_string, params in all_queries_to_run: # Make sure CREATE_FULLTEXT_RELATIONSHIP_FACT is in all_queries_to_run
+            for query_string, params in all_queries_to_run: 
                 try:
                     logger.debug(f"Executing: {query_string.strip()} with params {params if params else ''}")
                     await session.run(query_string, params)
                 except Exception as e:
-                    # ... your error handling ...
+                    logger.error(f"Failed to execute schema query '{query_string.strip()}': {e}", exc_info=True) # Enhanced logging
                     # Add a specific check for this index if you want more granular logging on failure
                     if "relationship_fact_ft" in query_string and "CREATE FULLTEXT INDEX" in query_string:
-                        logger.error(f"Failed to create full-text index 'relationship_fact_ft': {e}", exc_info=True)
-                    # ...
+                        logger.error(f"Specifically failed to create full-text index 'relationship_fact_ft': {e}", exc_info=True)
+                    
         logger.info("Finished ensuring database indices and constraints.")
 
     async def clear_all_known_indexes_and_constraints(self):
@@ -166,19 +160,23 @@ class SchemaManager:
             cypher_queries.DROP_INDEX_ENTITY_LABEL,
             cypher_queries.DROP_INDEX_ENTITY_NORMALIZED_NAME_LABEL,
             cypher_queries.DROP_FULLTEXT_CHUNK_CONTENT, 
-            cypher_queries.DROP_FULLTEXT_SOURCE_CONTENT, 
+            cypher_queries.DROP_FULLTEXT_SOURCE_CONTENT, # <-- ENSURED THIS IS PRESENT
             cypher_queries.DROP_FULLTEXT_ENTITY_NAME_DESC,
             cypher_queries.DROP_CONSTRAINT_CHUNK_UUID,
             cypher_queries.DROP_CONSTRAINT_SOURCE_UUID,
             cypher_queries.DROP_CONSTRAINT_SOURCE_NAME,
             cypher_queries.DROP_CONSTRAINT_ENTITY_UUID,
             cypher_queries.DROP_INDEX_RELATIONSHIP_LABEL,
+            # Relationship full-text index drop
+            "DROP INDEX relationship_fact_ft IF EXISTS", # <-- ADDED missing drop for relationship FT index
         ]
         
         chunk_vector_index_name = "chunk_content_embedding_vector"
         queries_to_drop_str.append(f"DROP INDEX {chunk_vector_index_name} IF EXISTS")
-        source_vector_index_name = "source_content_embedding_vector"
-        queries_to_drop_str.append(f"DROP INDEX {source_vector_index_name} IF EXISTS")
+        
+        source_vector_index_name = "source_content_embedding_vector" # Corrected name
+        queries_to_drop_str.append(f"DROP INDEX {source_vector_index_name} IF EXISTS") # <-- ENSURED THIS IS PRESENT AND CORRECT
+        
         entity_name_vector_index = "entity_name_embedding_vector"
         queries_to_drop_str.append(f"DROP INDEX {entity_name_vector_index} IF EXISTS")
         
