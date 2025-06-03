@@ -40,7 +40,17 @@ class ExtractedRelationshipsList(BaseModel):
     """
     relationships: List[ExtractedRelationship] = Field(default_factory=list, description="A list of relationships found in the text between the provided entities.")
 
+# --- Pydantic Models for LLM Output (Multi-Query Retrieval) ---
+class AlternativeQuery(BaseModel):
+    query: str = Field(..., description="An alternative user query based on the original.")
 
+class AlternativeQueriesList(BaseModel):
+    alternative_queries: List[AlternativeQuery] = Field(
+        default_factory=list, 
+        description="A list of alternative queries generated to help retrieve relevant data. Should not include the original query."
+    )
+    
+    
 # --- Prompt Templates for Entity Extraction ---
 ENTITY_EXTRACTION_SYSTEM_PROMPT = """
 You are an expert AI assistant tasked with identifying and extracting named entities from the provided text.
@@ -140,4 +150,37 @@ Guidelines:
 - Avoid overly generic labels like "RELATED_TO" if a more specific one applies.
 - If multiple sentences in the text describe the same core relationship between the same two entities, synthesize it into one representative `fact_sentence` and a single `relation_label`.
 - If no clear relationships meeting these strict criteria are found in the text, return an empty list for "relationships".
+"""
+
+
+# --- Prompt Templates for Multi-Query Retrieval (MQR) ---
+MULTI_QUERY_GENERATION_SYSTEM_PROMPT = """
+You are an expert AI assistant highly skilled in query understanding and reformulation for retrieval systems. 
+Your task is to generate alternative queries based on the user's original query to improve the chances of finding relevant information in a vector database.
+Adhere strictly to the formatting instructions and the user's language.
+The goal is to explore different phrasings, sub-topics, or perspectives related to the original query.
+Do not include the original query in your list of alternative_queries.
+"""
+
+MULTI_QUERY_GENERATION_USER_PROMPT_TEMPLATE = """
+Based on the "Original User Query" below, generate up to {max_alternative_questions} alternative user queries.
+These alternative queries should help retrieve a more diverse and comprehensive set of relevant documents from a vector database.
+
+Guidelines:
+- **If the user’s original query references multiple distinct entities or concepts**, ensure that:
+    - At least one, and ideally the first one or two, alternative queries rephrase the original query to capture the combined intent, possibly using synonyms or different sentence structures.
+    - Subsequent alternative queries can break down the original query by focusing on individual entities/concepts or different aspects/perspectives of the original query. For example, if the original query is "Compare the performance of Dell XPS 13 and MacBook Air M3 for students", alternatives could be "Student experiences with Dell XPS 13" and "MacBook Air M3 suitability for college work".
+- **If the user’s original query includes specific dates, times, or numerical values**, try to incorporate these accurately into relevant alternative queries or generate queries that explore related timeframes or values if appropriate.
+- **Maintain the original language** used by the user in all generated alternative queries.
+- **Focus on semantic alternatives**: Think about different ways someone might ask for the same or related information.
+- **Generate distinct queries**: Each alternative query should offer a unique angle or phrasing.
+- **Do NOT include the original query itself in the list of `alternative_queries` you generate.**
+
+Original User Query:
+"{original_user_query}"
+
+Current date (for context, if relevant to the query): {current_date}
+Current day of the week (for context, if relevant, e.g., for "tomorrow", "yesterday"): {current_day_of_a_week}
+
+Generate the alternative queries.
 """

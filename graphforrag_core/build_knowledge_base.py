@@ -26,17 +26,18 @@ async def _process_single_chunk_for_kb(
     source_node_uuid: str,
     source_identifier_for_chunk_desc: str,
     node_manager: NodeManager,
-    embedder: EmbedderClient, # Make sure embedder is passed here
+    embedder: EmbedderClient, 
     entity_extractor: EntityExtractor,
     entity_resolver: EntityResolver,
     relationship_extractor: RelationshipExtractor,
     allow_same_name_chunks_flag: bool = True,
     previous_chunk_content: Optional[str] = None
-) -> Tuple[Optional[str], Usage]:
-    accumulated_usage_for_chunk = Usage()
+) -> Tuple[Optional[str], Usage, Usage]: # MODIFIED: Returns (chunk_uuid, generative_usage, embedding_usage)
+    
+    current_chunk_generative_usage = Usage() # For LLM calls related to this chunk (extraction, resolution, etc.)
+    current_chunk_embedding_usage = Usage()  # For embedding calls related to this chunk
 
     # --- Chunk Preparation & DB Operation ---
-    # ... (chunk creation logic as before) ...
     chunk_uuid_str = str(chunk_metadata.pop("chunk_uuid", uuid.uuid4()))
     name_from_meta = chunk_metadata.pop("name", None)
     chunk_number_for_rel = chunk_metadata.pop("chunk_number", None)
@@ -68,8 +69,6 @@ async def _process_single_chunk_for_kb(
     final_dynamic_props_for_chunk = preprocess_metadata_for_neo4j(dynamic_props_for_chunk)
     created_at_ts = datetime.now(timezone.utc)
 
-    # ... (existing_chunk_records check if allow_same_name_chunks_flag is False) ...
-
     created_chunk_uuid_from_db = await node_manager.create_chunk_node_and_link_to_source(
         chunk_uuid=chunk_uuid_str, chunk_content=actual_chunk_content_to_store,
         source_node_uuid=source_node_uuid, source_identifier_for_chunk_desc=source_identifier_for_chunk_desc,
@@ -78,7 +77,7 @@ async def _process_single_chunk_for_kb(
     )
     if not created_chunk_uuid_from_db:
         logger.error(f"Failed to create/link chunk '{name_str}' via NodeManager.")
-        return None, accumulated_usage_for_chunk
+        return None, current_chunk_generative_usage, current_chunk_embedding_usage
 
 
     # --- Entity Processing ---
@@ -87,19 +86,18 @@ async def _process_single_chunk_for_kb(
         extracted_entities_list_model, extractor_usage = await entity_extractor.extract_entities(
             text_content=page_content, context_text=previous_chunk_content
         )
-        if extractor_usage: accumulated_usage_for_chunk += extractor_usage # type: ignore
+        if extractor_usage: current_chunk_generative_usage += extractor_usage # type: ignore
 
         if extracted_entities_list_model.entities:
             logger.info(f"    --- Starting Entity Resolution for Chunk '{name_str}' ---")
             for extracted_entity_data_model in extracted_entities_list_model.entities:
                 entity_data: ExtractedEntity = extracted_entity_data_model
                 resolution_decision, resolver_usage = await entity_resolver.resolve_entity(entity_data)
-                if resolver_usage: accumulated_usage_for_chunk += resolver_usage # type: ignore
+                if resolver_usage: current_chunk_generative_usage += resolver_usage # type: ignore
                 
                 canonical_name_from_resolver = resolution_decision.canonical_name
                 normalized_name_for_key = normalize_entity_name(canonical_name_from_resolver)
                 label_for_key = entity_data.label
-                # Use the canonical description from the resolver for consistency
                 final_entity_description_to_set = resolution_decision.canonical_description 
                 
                 db_entity_uuid: Optional[str] = None
@@ -108,8 +106,6 @@ async def _process_single_chunk_for_kb(
                 try:
                     if resolution_decision.is_duplicate and resolution_decision.duplicate_of_uuid:
                         db_entity_uuid = resolution_decision.duplicate_of_uuid
-                        logger.info(f"      Entity '{entity_data.name}' resolved as DUPLICATE of Entity UUID: '{db_entity_uuid}'. Canonical name: '{canonical_name_from_resolver}'")
-                        
                         node_details = await node_manager.fetch_entity_details(db_entity_uuid)
                         current_db_name = None
                         current_db_description = None
@@ -139,8 +135,6 @@ async def _process_single_chunk_for_kb(
                              await node_manager.driver.execute_query("MATCH (e:Entity {uuid: $uuid}) SET e.updated_at = $ts", uuid=db_entity_uuid, ts=created_at_ts, database_=node_manager.database) # type: ignore
                     else: 
                         new_entity_uuid_val = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{normalized_name_for_key}_{label_for_key}"))
-                        logger.info(f"      Entity '{entity_data.name}' resolved as NEW. Name: '{canonical_name_from_resolver}', Desc: '{final_entity_description_to_set}', Target UUID: {new_entity_uuid_val}")
-                        
                         final_entity_name_in_db = canonical_name_from_resolver
                         
                         merge_result = await node_manager.merge_or_create_entity_node(
@@ -150,7 +144,6 @@ async def _process_single_chunk_for_kb(
                             label_for_merge=label_for_key,
                             description_for_create=final_entity_description_to_set,
                             created_at_ts=created_at_ts
-                            # embedder=embedder # Pass embedder here for new nodes
                         )
                         if merge_result:
                             db_entity_uuid = merge_result[0]
@@ -163,62 +156,57 @@ async def _process_single_chunk_for_kb(
                         resolved_entities_for_chunk.append(ResolvedEntityInfo(uuid=db_entity_uuid, name=final_entity_name_in_db, label=label_for_key))
                         await node_manager.link_chunk_to_entity(created_chunk_uuid_from_db, db_entity_uuid, created_at_ts)
                         
-                        if embedder: # Check if embedder is available
+                        if embedder: 
                             if final_entity_name_in_db:
-                                if await node_manager.set_entity_name_embedding(db_entity_uuid, await embedder.embed_text(final_entity_name_in_db)):
-                                    logger.debug(f"        -> Stored name embedding for Entity '{db_entity_uuid}'.")
+                                name_embedding, name_embed_usage = await embedder.embed_text(final_entity_name_in_db) 
+                                if name_embed_usage: current_chunk_embedding_usage += name_embed_usage 
+                                if name_embedding: 
+                                    if await node_manager.set_entity_name_embedding(db_entity_uuid, name_embedding):
+                                        logger.debug(f"        -> Stored name embedding for Entity '{db_entity_uuid}'.")
                             
-                            # --- NEW: Embed and store description embedding ---
                             if final_entity_description_to_set:
-                                desc_embedding = await embedder.embed_text(final_entity_description_to_set)
-                                if desc_embedding:
-                                    await node_manager.set_entity_description_embedding(db_entity_uuid, desc_embedding)
+                                desc_embedding, desc_embed_usage = await embedder.embed_text(final_entity_description_to_set) 
+                                if desc_embed_usage: current_chunk_embedding_usage += desc_embed_usage 
+                                if desc_embedding: 
+                                    await node_manager.set_entity_description_embedding(db_entity_uuid, desc_embedding) 
                                     logger.debug(f"        -> Stored description embedding for Entity '{db_entity_uuid}'.")
-                            # --- END NEW ---
                     else:
                         logger.warning(f"      Skipping link and embed for entity '{entity_data.name}' as db_entity_uuid was not established.")
                 except Exception as e_entity_processing:
                     logger.error(f"      Error processing resolved entity '{entity_data.name}': {e_entity_processing}", exc_info=True)
             logger.info(f"    --- Finished Entity Resolution for Chunk '{name_str}' ---")
             
-    # --- Relationship Extraction (no changes needed here for description embedding) ---
-    # ... (relationship extraction logic as before) ...
     if created_chunk_uuid_from_db and relationship_extractor and resolved_entities_for_chunk:
         logger.info(f"    --- Starting Relationship Extraction for Chunk '{name_str}' ---")
         entities_for_rel_extraction = [ExtractedEntity(name=e.name, label=e.label, description=None) for e in resolved_entities_for_chunk]
         extracted_relationships_list_model, rel_extractor_usage = await relationship_extractor.extract_relationships(text_content=page_content, entities_in_chunk=entities_for_rel_extraction)
-        if rel_extractor_usage: accumulated_usage_for_chunk += rel_extractor_usage # type: ignore
+        if rel_extractor_usage: current_chunk_generative_usage += rel_extractor_usage # type: ignore
         if extracted_relationships_list_model.relationships:
             entity_name_to_uuid_map: Dict[str, str] = {entity.name: entity.uuid for entity in resolved_entities_for_chunk}
             for rel_data in extracted_relationships_list_model.relationships:
                 source_uuid = entity_name_to_uuid_map.get(rel_data.source_entity_name)
                 target_uuid = entity_name_to_uuid_map.get(rel_data.target_entity_name)
                 if not source_uuid or not target_uuid:
-                    logger.warning(f"      Could not map source '{rel_data.source_entity_name}' or target '{rel_data.target_entity_name}' to UUIDs for relationship. Skipping.")
-                    logger.debug(f"      Available entity names in map for this chunk: {list(entity_name_to_uuid_map.keys())}")
-                    logger.debug(f"      LLM extracted source: '{rel_data.source_entity_name}', target: '{rel_data.target_entity_name}' for fact: '{rel_data.fact_sentence}'")
                     continue
                 if source_uuid == target_uuid: continue
                 relationship_uuid = await node_manager.create_or_merge_relationship(source_entity_uuid=source_uuid, target_entity_uuid=target_uuid, relation_label=rel_data.relation_label, fact_sentence=rel_data.fact_sentence, source_chunk_uuid=created_chunk_uuid_from_db, created_at_ts=created_at_ts)
                 if relationship_uuid and embedder:
-                    fact_embedding = await embedder.embed_text(rel_data.fact_sentence)
-                    if fact_embedding:
-                        await node_manager.set_relationship_fact_embedding(relationship_uuid, fact_embedding)
+                    fact_embedding, fact_embed_usage = await embedder.embed_text(rel_data.fact_sentence) 
+                    if fact_embed_usage: current_chunk_embedding_usage += fact_embed_usage 
+                    if fact_embedding: 
+                        await node_manager.set_relationship_fact_embedding(relationship_uuid, fact_embedding) 
         else: logger.info(f"    No relationships extracted for chunk '{name_str}'.")
         logger.info(f"    --- Finished Relationship Extraction for Chunk '{name_str}' ---")
 
-
-    # --- Chunk Embedding (no changes here) ---
-    # ... (chunk embedding logic as before) ...
     if created_chunk_uuid_from_db and embedder:
-        embedding_vector = await embedder.embed_text(text_content_to_embed)
+        embedding_vector, chunk_embed_usage = await embedder.embed_text(text_content_to_embed) 
+        if chunk_embed_usage: current_chunk_embedding_usage += chunk_embed_usage 
         if embedding_vector: 
             if await node_manager.set_chunk_content_embedding(created_chunk_uuid_from_db, embedding_vector):
                 logger.debug(f"    Successfully stored embedding for chunk: {created_chunk_uuid_from_db}")
         else: logger.warning(f"    Embedding vector was empty for chunk {created_chunk_uuid_from_db}. Skipping embedding storage.")
-
     
-    return created_chunk_uuid_from_db, accumulated_usage_for_chunk
+    return created_chunk_uuid_from_db, current_chunk_generative_usage, current_chunk_embedding_usage
 
 async def add_documents_to_knowledge_base(
     source_identifier: str,
@@ -231,13 +219,10 @@ async def add_documents_to_knowledge_base(
     source_content: Optional[str] = None,
     source_dynamic_metadata: Optional[dict] = None,
     allow_same_name_chunks_for_this_source: bool = True
-) -> Tuple[Optional[str], List[str], Usage]:
-    """
-    Processes a set of documents (chunks) for a given source, adding them and their
-    extracted knowledge to the graph.
-    Returns the source node UUID, list of added chunk UUIDs, and total LLM usage.
-    """
-    total_usage_for_source_set = Usage()
+) -> Tuple[Optional[str], List[str], Usage, Usage]: # MODIFIED: Returns (source_uuid, chunk_uuids, total_gen_usage, total_embed_usage)
+    
+    total_generative_usage_for_source_set = Usage() # For generative LLM calls
+    total_embedding_usage_for_source_set = Usage()  # For embedding calls
     
     logger.info(f"Building knowledge base for source: [magenta]{source_identifier}[/magenta]")
     
@@ -252,11 +237,12 @@ async def add_documents_to_knowledge_base(
 
     if not source_node_uuid:
         logger.error(f"  Failed to create/merge source node for '{source_identifier}'. Aborting chunk processing for this source.")
-        return None, [], total_usage_for_source_set
+        return None, [], total_generative_usage_for_source_set, total_embedding_usage_for_source_set
 
     logger.debug(f"Source node processed by NodeManager: UUID '{source_node_uuid}', Identifier: '{source_identifier}'.")
     if source_content and embedder:
-        embedding_vector = await embedder.embed_text(source_content)
+        embedding_vector, source_embed_usage = await embedder.embed_text(source_content) 
+        if source_embed_usage: total_embedding_usage_for_source_set += source_embed_usage 
         if embedding_vector:
             if await node_manager.set_source_content_embedding(source_node_uuid, embedding_vector):
                 logger.debug(f"  Successfully stored embedding for Source node: {source_node_uuid}")
@@ -278,7 +264,8 @@ async def add_documents_to_knowledge_base(
 
         logger.debug(f"  Processing chunk {doc_idx + 1}/{len(documents_data)}: Name='{chunk_name_for_log}', Number={chunk_num_for_log}")
 
-        created_chunk_uuid, chunk_usage = await _process_single_chunk_for_kb(
+        # Now _process_single_chunk_for_kb returns three items
+        created_chunk_uuid, chunk_gen_usage, chunk_embed_usage = await _process_single_chunk_for_kb(
             page_content=page_content, 
             chunk_metadata=chunk_metadata, 
             source_node_uuid=source_node_uuid,
@@ -291,7 +278,8 @@ async def add_documents_to_knowledge_base(
             allow_same_name_chunks_flag=allow_same_name_chunks_for_this_source,
             previous_chunk_content=previous_chunk_page_content 
         )
-        if chunk_usage: total_usage_for_source_set += chunk_usage # type: ignore
+        if chunk_gen_usage: total_generative_usage_for_source_set += chunk_gen_usage # type: ignore
+        if chunk_embed_usage: total_embedding_usage_for_source_set += chunk_embed_usage # type: ignore
 
         if created_chunk_uuid:
             added_chunk_uuids.append(created_chunk_uuid)
@@ -301,4 +289,4 @@ async def add_documents_to_knowledge_base(
         previous_chunk_page_content = page_content 
 
     logger.info(f"Finished building knowledge base for source [magenta]{source_identifier}[/magenta]. Added {len(added_chunk_uuids)} chunks.")
-    return source_node_uuid, added_chunk_uuids, total_usage_for_source_set
+    return source_node_uuid, added_chunk_uuids, total_generative_usage_for_source_set, total_embedding_usage_for_source_set

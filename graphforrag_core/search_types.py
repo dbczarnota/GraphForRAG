@@ -14,7 +14,8 @@ class ChunkRerankerMethod(str, Enum):
 class ChunkSearchConfig(BaseModel):
     search_methods: List[ChunkSearchMethod] = Field(default_factory=lambda: [ChunkSearchMethod.KEYWORD, ChunkSearchMethod.SEMANTIC])
     reranker: ChunkRerankerMethod = ChunkRerankerMethod.RRF
-    limit: int = Field(default=10, description="Final number of results to return for this type.")
+    limit: int = Field(default=10, description="Final number of results to return for this type if min_results is not dominant.") # Wording slightly adjusted
+    min_results: int = Field(default=0, ge=0, description="Minimum number of chunk results to try to include, if available. Overrides 'limit' for this type if necessary to meet this minimum.") # ADDED
     keyword_fetch_limit: int = Field(default=20)
     semantic_fetch_limit: int = Field(default=20)
     min_similarity_score: float = Field(default=0.7)
@@ -33,7 +34,8 @@ class EntityRerankerMethod(str, Enum):
 class EntitySearchConfig(BaseModel):
     search_methods: List[EntitySearchMethod] = Field(default_factory=lambda: [EntitySearchMethod.KEYWORD_NAME_DESC, EntitySearchMethod.SEMANTIC_NAME, EntitySearchMethod.SEMANTIC_DESCRIPTION])
     reranker: EntityRerankerMethod = EntityRerankerMethod.RRF
-    limit: int = Field(default=10, description="Final number of results to return for this type.")
+    limit: int = Field(default=10, description="Final number of results to return for this type if min_results is not dominant.")
+    min_results: int = Field(default=0, ge=0, description="Minimum number of entity results to try to include, if available.") # ADDED
     keyword_fetch_limit: int = Field(default=20)
     semantic_name_fetch_limit: int = Field(default=20)
     semantic_description_fetch_limit: int = Field(default=20)
@@ -54,7 +56,8 @@ class RelationshipSearchConfig(BaseModel):
         default_factory=lambda: [RelationshipSearchMethod.KEYWORD_FACT, RelationshipSearchMethod.SEMANTIC_FACT]
     )
     reranker: RelationshipRerankerMethod = RelationshipRerankerMethod.RRF
-    limit: int = Field(default=10, description="Final number of results to return for this type.")
+    limit: int = Field(default=10, description="Final number of results to return for this type if min_results is not dominant.")
+    min_results: int = Field(default=0, ge=0, description="Minimum number of relationship results to try to include, if available.") # ADDED
     keyword_fetch_limit: int = Field(default=20)
     semantic_fetch_limit: int = Field(default=20)
     min_similarity_score: float = Field(default=0.7, description="Minimum similarity score for semantic search on relationship facts.")
@@ -73,18 +76,12 @@ class SourceSearchConfig(BaseModel):
         default_factory=lambda: [SourceSearchMethod.KEYWORD_CONTENT, SourceSearchMethod.SEMANTIC_CONTENT]
     )
     reranker: SourceRerankerMethod = SourceRerankerMethod.RRF
-    limit: int = Field(default=5, description="Final number of results to return for Source type.") # Adjusted default limit
+    limit: int = Field(default=5, description="Final number of results to return for Source type if min_results is not dominant.")
+    min_results: int = Field(default=0, ge=0, description="Minimum number of source results to try to include, if available.") # ADDED
     keyword_fetch_limit: int = Field(default=10)
     semantic_fetch_limit: int = Field(default=10)
     min_similarity_score: float = Field(default=0.7)
     rrf_k: int = Field(default=60)
-
-# --- Overall Search Configuration ---
-class SearchConfig(BaseModel):
-    chunk_config: Optional[ChunkSearchConfig] = Field(default_factory=ChunkSearchConfig)
-    entity_config: Optional[EntitySearchConfig] = Field(default_factory=EntitySearchConfig)
-    relationship_config: Optional[RelationshipSearchConfig] = Field(default_factory=RelationshipSearchConfig)
-    source_config: Optional[SourceSearchConfig] = Field(default_factory=SourceSearchConfig) # <-- ADDED
 
 # --- General Search Result Structures ---
 class SearchResultItem(BaseModel):
@@ -103,3 +100,26 @@ class SearchResultItem(BaseModel):
 class CombinedSearchResults(BaseModel):
     items: List[SearchResultItem] = Field(default_factory=list)
     query_text: Optional[str] = None
+    
+class MultiQueryConfig(BaseModel):
+    enabled: bool = Field(default=False, description="Whether to enable Multi-Query Retrieval.")
+    max_alternative_questions: int = Field(
+        default=3, 
+        ge=1, 
+        le=5, 
+        description="Maximum number of alternative questions to generate (excluding the original query)."
+    )
+    
+    
+# --- Overall Search Configuration ---
+class SearchConfig(BaseModel):
+    chunk_config: Optional[ChunkSearchConfig] = Field(default_factory=ChunkSearchConfig)
+    entity_config: Optional[EntitySearchConfig] = Field(default_factory=EntitySearchConfig)
+    relationship_config: Optional[RelationshipSearchConfig] = Field(default_factory=RelationshipSearchConfig)
+    source_config: Optional[SourceSearchConfig] = Field(default_factory=SourceSearchConfig) 
+    mqr_config: Optional[MultiQueryConfig] = Field(default=None, description="Configuration for Multi-Query Retrieval. If None, MQR is disabled.")
+    overall_results_limit: Optional[int] = Field(
+        default=10, # Defaulting to 10, can be None if no limit is desired by default
+        ge=1, 
+        description="Optional overall limit for the final number of results returned by the combined search. Applied after aggregation and sorting."
+    ) # <-- ADDED

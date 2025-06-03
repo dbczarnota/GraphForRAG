@@ -65,8 +65,10 @@ class EntityResolver:
             return []
         
         try:
-            embedding_vector = await self.embedder.embed_text(entity_name)
-            if not embedding_vector:
+            # embed_text now returns (embedding_vector, usage_info)
+            embedding_vector_data, _ = await self.embedder.embed_text(entity_name) # Unpack, ignore usage here
+            
+            if not embedding_vector_data: # Check the actual vector
                 logger.warning(f"Could not generate embedding for new entity name: '{entity_name}'")
                 return []
 
@@ -75,13 +77,13 @@ class EntityResolver:
             params = {
                 "index_name_param": vector_index_name,
                 "top_k_param": self.top_k_candidates,
-                "embedding_vector_param": embedding_vector,
+                "embedding_vector_param": embedding_vector_data, # Use the unpacked vector
                 "min_similarity_score_param": self.similarity_threshold
             }
             
             results, _, _ = await self.driver.execute_query( # type: ignore
                 cypher_queries.FIND_SIMILAR_ENTITIES_BY_VECTOR,
-                params,
+                params, # params now correctly contains only the vector
                 database_=self.database
             )
             

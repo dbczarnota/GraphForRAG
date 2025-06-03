@@ -1,7 +1,8 @@
 # C:\Users\czarn\Documents\A_PYTHON\GraphForRAG\graphforrag_core\openai_embedder.py
 import os
-from typing import List
+from typing import List, Tuple, Optional # Added Tuple, Optional
 from openai import AsyncOpenAI # Use AsyncOpenAI
+from pydantic_ai.usage import Usage # Import Usage
 from .embedder_client import EmbedderClient, EmbedderConfig, DEFAULT_EMBEDDING_DIMENSION
 
 # It's good practice to load API keys from environment variables
@@ -43,14 +44,17 @@ class OpenAIEmbedder(EmbedderClient):
              self._openai_native_dimension = self.config.embedding_dimension
 
 
-    async def embed_text(self, text: str) -> List[float]:
-        embeddings = await self.embed_texts([text])
-        return embeddings[0]
+    async def embed_text(self, text: str) -> Tuple[List[float], Optional[Usage]]: # MODIFIED return type
+        embeddings, usage = await self.embed_texts([text])
+        return embeddings[0] if embeddings else [], usage
 
-    async def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    async def embed_texts(self, texts: List[str]) -> Tuple[List[List[float]], Optional[Usage]]: # MODIFIED return type
         if not texts:
-            return []
+            return [], None
         texts_to_embed = [t.replace("\n", " ") for t in texts]
+        
+        embedding_usage: Optional[Usage] = None
+        
         try:
             # For models like text-embedding-3-small, you can request a specific dimension
             # For ada-002, it always returns 1536, so we'd truncate if config.embedding_dimension is smaller
@@ -66,10 +70,18 @@ class OpenAIEmbedder(EmbedderClient):
                     model=self.config.model_name
                  )
 
+            if response.usage:
+                embedding_usage = Usage(
+                    requests=1, # Each call to embed_texts is one request
+                    request_tokens=response.usage.prompt_tokens,
+                    response_tokens=0, # Embedding APIs typically don't have "response tokens" in the same way chat models do
+                    total_tokens=response.usage.total_tokens
+                )
+
             return [
                 embedding.embedding[:self.config.embedding_dimension] 
                 for embedding in response.data
-            ]
+            ], embedding_usage
         except Exception as e:
             # logger.error(f"Error getting embeddings from OpenAI: {e}", exc_info=True) # Use logger from GraphForRAG
-            raise
+            raise # Re-raise the exception to be handled by the caller

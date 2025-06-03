@@ -24,8 +24,11 @@ from .search_types import (
     RelationshipSearchConfig, RelationshipSearchMethod,
     SourceSearchConfig, SourceSearchMethod, 
     CombinedSearchResults, 
-    SearchResultItem
+    SearchResultItem,
+    MultiQueryConfig
 )
+from .multi_query_generator import MultiQueryGenerator
+
 
 logger = logging.getLogger("graph_for_rag")
 
@@ -58,12 +61,14 @@ class GraphForRAG:
             self._entity_extractor: Optional[EntityExtractor] = None
             self._entity_resolver: Optional[EntityResolver] = None
             self._relationship_extractor: Optional[RelationshipExtractor] = None
+            self._multi_query_generator: Optional[MultiQueryGenerator] = None
             
             self.schema_manager = SchemaManager(self.driver, self.database, self.embedder)
             self.node_manager = NodeManager(self.driver, self.database)
             self.search_manager = SearchManager(self.driver, self.database, self.embedder) 
             
-            self.total_llm_usage: Usage = Usage()
+            self.total_generative_llm_usage: Usage = Usage() # RENAMED
+            self.total_embedding_usage: Usage = Usage() # ADDED
 
             logger.info(f"Using embedder: {self.embedder.config.model_name} with dimension {self.embedder.dimension}")
             if self._llm_client_input:
@@ -118,12 +123,30 @@ class GraphForRAG:
             self._relationship_extractor = RelationshipExtractor(llm_client=self._ensure_services_llm_client())
         return self._relationship_extractor
 
-    def _accumulate_usage(self, new_usage: Optional[Usage]):
+    @property
+    def multi_query_generator(self) -> MultiQueryGenerator:
+        if self._multi_query_generator is None:
+            self._multi_query_generator = MultiQueryGenerator(llm_client=self._ensure_services_llm_client())
+        return self._multi_query_generator
+
+    def _accumulate_generative_usage(self, new_usage: Optional[Usage]): # RENAMED
         if new_usage and hasattr(new_usage, 'has_values') and new_usage.has_values():
-            self.total_llm_usage = self.total_llm_usage + new_usage # type: ignore
+            self.total_generative_llm_usage = self.total_generative_llm_usage + new_usage # type: ignore
     
-    def get_total_llm_usage(self) -> Usage: # type: ignore
-        return self.total_llm_usage
+    def _accumulate_embedding_usage(self, new_usage: Optional[Usage]): # ADDED
+        if new_usage and hasattr(new_usage, 'has_values') and new_usage.has_values():
+            self.total_embedding_usage = self.total_embedding_usage + new_usage # type: ignore
+
+    def get_total_llm_usage(self) -> Usage: 
+        # Combines generative and embedding usage for an overall picture
+        # Pydantic's Usage object supports addition
+        return self.total_generative_llm_usage + self.total_embedding_usage # type: ignore
+
+    def get_total_generative_llm_usage(self) -> Usage: # ADDED getter
+        return self.total_generative_llm_usage
+        
+    def get_total_embedding_usage(self) -> Usage: # ADDED getter
+        return self.total_embedding_usage
 
     async def close(self):
         if self.driver:
@@ -147,11 +170,13 @@ class GraphForRAG:
         source_dynamic_metadata: Optional[dict] = None,
         allow_same_name_chunks_for_this_source: bool = True
     ) -> Tuple[Optional[str], List[str]]:
+        # Ensure LLM services are ready if they'll be needed during ingestion
         _ = self.entity_extractor 
         _ = self.entity_resolver
         _ = self.relationship_extractor
         
-        source_node_uuid, added_chunk_uuids, usage_for_set = await add_documents_to_knowledge_base(
+        # add_documents_to_knowledge_base now returns four items
+        source_node_uuid, added_chunk_uuids, gen_usage_for_set, embed_usage_for_set = await add_documents_to_knowledge_base(
             source_identifier=source_identifier,
             documents_data=documents_data,
             node_manager=self.node_manager,
@@ -163,7 +188,8 @@ class GraphForRAG:
             source_dynamic_metadata=source_dynamic_metadata,
             allow_same_name_chunks_for_this_source=allow_same_name_chunks_for_this_source
         )
-        self._accumulate_usage(usage_for_set)
+        self._accumulate_generative_usage(gen_usage_for_set) # Correctly accumulate generative usage
+        self._accumulate_embedding_usage(embed_usage_for_set)   # Correctly accumulate embedding usage
         return source_node_uuid, added_chunk_uuids
 
     async def search(
@@ -180,76 +206,162 @@ class GraphForRAG:
             logger.info("No search configuration provided, using default SearchConfig.")
             config = SearchConfig()
         
-        query_embedding: Optional[List[float]] = None
-        needs_semantic_search = False
-        # Determine if any configured search method requires an embedding
-        if config.source_config and SourceSearchMethod.SEMANTIC_CONTENT in config.source_config.search_methods: 
-            needs_semantic_search = True
-        if not needs_semantic_search and config.chunk_config and ChunkSearchMethod.SEMANTIC in config.chunk_config.search_methods: 
-            needs_semantic_search = True
-        if not needs_semantic_search and config.entity_config:
-            if EntitySearchMethod.SEMANTIC_NAME in config.entity_config.search_methods or \
-               EntitySearchMethod.SEMANTIC_DESCRIPTION in config.entity_config.search_methods: 
-                needs_semantic_search = True
-        if not needs_semantic_search and config.relationship_config:
-            if RelationshipSearchMethod.SEMANTIC_FACT in config.relationship_config.search_methods: 
-                needs_semantic_search = True
-                
-        embed_duration = 0.0
-        if needs_semantic_search:
-            embed_start_time = time.perf_counter()
+        all_queries_to_process: List[str] = [query_text]
+        total_mqr_generation_duration = 0.0
+
+        if config.mqr_config and config.mqr_config.enabled:
+            logger.info(f"MQR enabled. Generating alternative queries for: '{query_text}'")
+            mqr_start_time = time.perf_counter()
+            alternative_queries_list, mqr_usage = await self.multi_query_generator.generate_alternative_queries(
+                original_query=query_text,
+                max_alternative_questions=config.mqr_config.max_alternative_questions
+            )
+            self._accumulate_generative_usage(mqr_usage)
+            total_mqr_generation_duration = (time.perf_counter() - mqr_start_time) * 1000
+            logger.info(f"MQR: Generation took {total_mqr_generation_duration:.2f} ms. Found {len(alternative_queries_list)} alternatives.")
+            if alternative_queries_list:
+                all_queries_to_process.extend(alternative_queries_list)
+                logger.info(f"MQR: Total queries to process: {len(all_queries_to_process)} (Original + {len(alternative_queries_list)} alternatives)")
+        
+        query_to_embedding_map: Dict[str, Optional[List[float]]] = {}
+        total_embedding_generation_duration = 0.0
+        
+        queries_requiring_embedding: List[str] = []
+        for q_text in all_queries_to_process:
+            needs_embedding = False
+            if config.source_config and SourceSearchMethod.SEMANTIC_CONTENT in config.source_config.search_methods: needs_embedding = True
+            if not needs_embedding and config.chunk_config and ChunkSearchMethod.SEMANTIC in config.chunk_config.search_methods: needs_embedding = True
+            if not needs_embedding and config.entity_config and (EntitySearchMethod.SEMANTIC_NAME in config.entity_config.search_methods or EntitySearchMethod.SEMANTIC_DESCRIPTION in config.entity_config.search_methods): needs_embedding = True
+            if not needs_embedding and config.relationship_config and RelationshipSearchMethod.SEMANTIC_FACT in config.relationship_config.search_methods: needs_embedding = True
+            
+            if needs_embedding:
+                queries_requiring_embedding.append(q_text)
+            query_to_embedding_map[q_text] = None 
+
+        if queries_requiring_embedding:
+            logger.info(f"GRAPHFORRAG.search: Generating embeddings concurrently for {len(queries_requiring_embedding)} queries.")
+            embed_batch_start_time = time.perf_counter()
+            embedding_tasks = [self.embedder.embed_text(q) for q in queries_requiring_embedding]
+            
             try:
-                logger.debug(f"GRAPHFORRAG.search: Generating embedding for query: '{query_text}'")
-                query_embedding = await self.embedder.embed_text(query_text)
-                if not query_embedding: 
-                    logger.warning(f"GRAPHFORRAG.search: Failed to generate embedding for query: '{query_text}'.")
-            except Exception as e:
-                logger.error(f"GRAPHFORRAG.search: Error generating query embedding: {e}", exc_info=True)
-                query_embedding = None 
-            embed_duration = (time.perf_counter() - embed_start_time) * 1000
-            logger.info(f"GRAPHFORRAG.search: Query embedding generation took {embed_duration:.2f} ms.")
+                results_or_exceptions = await asyncio.gather(*embedding_tasks, return_exceptions=True)
+                for i, res_or_exc in enumerate(results_or_exceptions):
+                    query_for_this_embedding = queries_requiring_embedding[i]
+                    if isinstance(res_or_exc, Exception):
+                        logger.error(f"GRAPHFORRAG.search: Error generating embedding for query '{query_for_this_embedding}': {res_or_exc}", exc_info=False)
+                        query_to_embedding_map[query_for_this_embedding] = None
+                    elif isinstance(res_or_exc, tuple) and len(res_or_exc) == 2:
+                        embedding_vector, usage_info = res_or_exc
+                        query_to_embedding_map[query_for_this_embedding] = embedding_vector
+                        self._accumulate_embedding_usage(usage_info) 
+                        if embedding_vector is None: 
+                             logger.warning(f"GRAPHFORRAG.search: Embedding for query '{query_for_this_embedding}' was None despite no exception.")
+                    else: 
+                        logger.error(f"GRAPHFORRAG.search: Unexpected result type from embed_text for query '{query_for_this_embedding}': {type(res_or_exc)}")
+                        query_to_embedding_map[query_for_this_embedding] = None
+            except Exception as e_gather: 
+                logger.error(f"GRAPHFORRAG.search: asyncio.gather for embeddings failed: {e_gather}", exc_info=True)
+            total_embedding_generation_duration = (time.perf_counter() - embed_batch_start_time) * 1000
+            logger.info(f"GRAPHFORRAG.search: Batch query embedding generation took {total_embedding_generation_duration:.2f} ms.")
+        else:
+            logger.info("GRAPHFORRAG.search: No queries required semantic embeddings.")
 
-        all_results_from_methods: List[Optional[List[SearchResultItem]]] = [] 
-        sequential_execution_start_time = time.perf_counter()
+        all_raw_results_from_search_manager: List[SearchResultItem] = []
+        total_sequential_search_calls_duration = 0.0
 
-        # Using sequential execution for profiling clarity
-        if config.source_config:
-            s_time = time.perf_counter()
-            res = await self.search_manager.search_sources(query_text, config.source_config, query_embedding)
-            logger.debug(f"GRAPHFORRAG.search (TIMING): search_sources call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
-            if res: all_results_from_methods.append(res)
+        for i, current_query_text_for_processing in enumerate(all_queries_to_process):
+            is_original_query = (i == 0)
+            query_log_prefix = "Original Query" if is_original_query else f"MQR Query {i+1}"
+            logger.info(f"--- {query_log_prefix}: '{current_query_text_for_processing}' ---")
+            current_query_embedding = query_to_embedding_map.get(current_query_text_for_processing)
+            # ... (logging for missing embedding if needed) ...
+
+            sequential_execution_start_time = time.perf_counter()
+            if config.source_config:
+                s_time = time.perf_counter(); res = await self.search_manager.search_sources(current_query_text_for_processing, config.source_config, current_query_embedding)
+                logger.debug(f"GRAPHFORRAG.search ({query_log_prefix}, TIMING): search_sources call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
+                if res: all_raw_results_from_search_manager.extend(res)
+            if config.chunk_config:
+                s_time = time.perf_counter(); res = await self.search_manager.search_chunks(current_query_text_for_processing, config.chunk_config, current_query_embedding)
+                logger.debug(f"GRAPHFORRAG.search ({query_log_prefix}, TIMING): search_chunks call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
+                if res: all_raw_results_from_search_manager.extend(res)
+            if config.entity_config:
+                s_time = time.perf_counter(); res = await self.search_manager.search_entities(current_query_text_for_processing, config.entity_config, current_query_embedding)
+                logger.debug(f"GRAPHFORRAG.search ({query_log_prefix}, TIMING): search_entities call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
+                if res: all_raw_results_from_search_manager.extend(res)
+            if config.relationship_config:
+                s_time = time.perf_counter(); res = await self.search_manager.search_relationships(current_query_text_for_processing, config.relationship_config, current_query_embedding)
+                logger.debug(f"GRAPHFORRAG.search ({query_log_prefix}, TIMING): search_relationships call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
+                if res: all_raw_results_from_search_manager.extend(res)
+            
+            current_query_sequential_search_duration = (time.perf_counter() - sequential_execution_start_time) * 1000
+            total_sequential_search_calls_duration += current_query_sequential_search_duration
+            logger.info(f"GRAPHFORRAG.search ({query_log_prefix}): Sequential search method calls for this query took {current_query_sequential_search_duration:.2f} ms.")
+            logger.info(f"--- Finished processing {query_log_prefix} ---")
+
+        logger.info(f"GRAPHFORRAG.search: MQR generation took {total_mqr_generation_duration:.2f} ms.")
+        logger.info(f"GRAPHFORRAG.search: Total (batch) embedding generation time across all queries: {total_embedding_generation_duration:.2f} ms.")
+        logger.info(f"GRAPHFORRAG.search: Total time for all sequential search calls across all queries: {total_sequential_search_calls_duration:.2f} ms.")
         
-        if config.chunk_config:
-            s_time = time.perf_counter()
-            res = await self.search_manager.search_chunks(query_text, config.chunk_config, query_embedding)
-            logger.debug(f"GRAPHFORRAG.search (TIMING): search_chunks call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
-            if res: all_results_from_methods.append(res)
+        # 1. Initial Deduplication of all raw results
+        deduplicated_scored_items_map: Dict[str, SearchResultItem] = {}
+        if all_raw_results_from_search_manager:
+            for item in all_raw_results_from_search_manager:
+                if item.uuid not in deduplicated_scored_items_map or item.score > deduplicated_scored_items_map[item.uuid].score:
+                    deduplicated_scored_items_map[item.uuid] = item
         
-        if config.entity_config:
-            s_time = time.perf_counter()
-            res = await self.search_manager.search_entities(query_text, config.entity_config, query_embedding)
-            logger.debug(f"GRAPHFORRAG.search (TIMING): search_entities call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
-            if res: all_results_from_methods.append(res)
+        # Convert map to list and sort by score for further processing
+        deduplicated_and_sorted_items = sorted(deduplicated_scored_items_map.values(), key=lambda x: x.score, reverse=True)
+        logger.debug(f"GRAPHFORRAG.search: After initial deduplication, {len(deduplicated_and_sorted_items)} unique items sorted by score.")
+
+        # 2. Guarantee Minimums
+        final_results_list: List[SearchResultItem] = []
+        added_uuids_for_final_list: set[str] = set()
+
+        result_type_configs = []
+        if config.chunk_config and config.chunk_config.min_results > 0:
+            result_type_configs.append({"type": "Chunk", "min": config.chunk_config.min_results, "cfg": config.chunk_config})
+        if config.entity_config and config.entity_config.min_results > 0:
+            result_type_configs.append({"type": "Entity", "min": config.entity_config.min_results, "cfg": config.entity_config})
+        if config.relationship_config and config.relationship_config.min_results > 0:
+            result_type_configs.append({"type": "Relationship", "min": config.relationship_config.min_results, "cfg": config.relationship_config})
+        if config.source_config and config.source_config.min_results > 0:
+            result_type_configs.append({"type": "Source", "min": config.source_config.min_results, "cfg": config.source_config})
+
+        for type_info in result_type_configs:
+            current_type = type_info["type"]
+            min_to_add = type_info["min"]
+            count_for_type = 0
+            for item in deduplicated_and_sorted_items:
+                if item.result_type == current_type and item.uuid not in added_uuids_for_final_list:
+                    if count_for_type < min_to_add:
+                        final_results_list.append(item)
+                        added_uuids_for_final_list.add(item.uuid)
+                        count_for_type += 1
+                    else:
+                        break # Met minimum for this type
+            logger.debug(f"Guaranteed {count_for_type}/{min_to_add} for type '{current_type}'. Total guaranteed: {len(final_results_list)}")
+
+        # 3. Fill Remaining up to overall_results_limit
+        # Items in deduplicated_and_sorted_items are already score-sorted.
+        if config.overall_results_limit is None or len(final_results_list) < config.overall_results_limit:
+            limit_for_fill = config.overall_results_limit if config.overall_results_limit is not None else float('inf')
+            
+            for item in deduplicated_and_sorted_items:
+                if len(final_results_list) >= limit_for_fill:
+                    break
+                if item.uuid not in added_uuids_for_final_list:
+                    final_results_list.append(item)
+                    added_uuids_for_final_list.add(item.uuid)
+            logger.debug(f"Filled remaining. Total items before final sort: {len(final_results_list)}")
+
+        # 4. Final Sort and Limit (if overall_results_limit was exceeded by minimums or no limit was initially applied for fill)
+        final_results_list.sort(key=lambda x: x.score, reverse=True)
         
-        if config.relationship_config:
-            s_time = time.perf_counter()
-            res = await self.search_manager.search_relationships(query_text, config.relationship_config, query_embedding)
-            logger.debug(f"GRAPHFORRAG.search (TIMING): search_relationships call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
-            if res: all_results_from_methods.append(res)
-        
-        sequential_execution_duration = (time.perf_counter() - sequential_execution_start_time) * 1000
-        logger.info(f"GRAPHFORRAG.search: All sequential search method calls took {sequential_execution_duration:.2f} ms.")
-        
-        all_items: List[SearchResultItem] = []
-        for result_list_for_type in all_results_from_methods: 
-            if result_list_for_type: 
-                all_items.extend(result_list_for_type)
-        
-        sort_start_time = time.perf_counter()
-        all_items.sort(key=lambda x: x.score, reverse=True) 
-        sort_duration = (time.perf_counter() - sort_start_time) * 1000
-        logger.debug(f"GRAPHFORRAG.search: Final sort of {len(all_items)} items took {sort_duration:.2f} ms.")
+        if config.overall_results_limit is not None and len(final_results_list) > config.overall_results_limit:
+            logger.info(f"Applying final overall_results_limit ({config.overall_results_limit}). Truncating from {len(final_results_list)}.")
+            final_results_list = final_results_list[:config.overall_results_limit]
         
         total_search_internal_duration = (time.perf_counter() - search_internal_total_start_time) * 1000
-        logger.info(f"GRAPHFORRAG.search: Total internal execution time {total_search_internal_duration:.2f} ms. Found {len(all_items)} combined items.")
-        return CombinedSearchResults(items=all_items, query_text=query_text)
+        logger.info(f"GRAPHFORRAG.search: Total internal execution time {total_search_internal_duration:.2f} ms. Found {len(final_results_list)} combined items.")
+        return CombinedSearchResults(items=final_results_list, query_text=query_text)
