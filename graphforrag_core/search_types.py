@@ -24,23 +24,23 @@ class ChunkSearchConfig(BaseModel):
 
 # --- Entity Search Specific ---
 class EntitySearchMethod(str, Enum):
-    KEYWORD_NAME_DESC = "keyword_name_description_fulltext"
+    KEYWORD_NAME = "keyword_name_fulltext" # Renamed from KEYWORD_NAME_DESC
     SEMANTIC_NAME = "semantic_name_vector"
-    SEMANTIC_DESCRIPTION = "semantic_description_vector"
+    # SEMANTIC_DESCRIPTION = "semantic_description_vector" # REMOVED
 
 class EntityRerankerMethod(str, Enum):
     RRF = "reciprocal_rank_fusion"
 
 class EntitySearchConfig(BaseModel):
-    search_methods: List[EntitySearchMethod] = Field(default_factory=lambda: [EntitySearchMethod.KEYWORD_NAME_DESC, EntitySearchMethod.SEMANTIC_NAME, EntitySearchMethod.SEMANTIC_DESCRIPTION])
+    search_methods: List[EntitySearchMethod] = Field(default_factory=lambda: [EntitySearchMethod.KEYWORD_NAME, EntitySearchMethod.SEMANTIC_NAME]) # Updated default
     reranker: EntityRerankerMethod = EntityRerankerMethod.RRF
     limit: int = Field(default=10, description="Final number of results to return for this type if min_results is not dominant.")
-    min_results: int = Field(default=0, ge=0, description="Minimum number of entity results to try to include, if available.") # ADDED
+    min_results: int = Field(default=0, ge=0, description="Minimum number of entity results to try to include, if available.") 
     keyword_fetch_limit: int = Field(default=20)
     semantic_name_fetch_limit: int = Field(default=20)
-    semantic_description_fetch_limit: int = Field(default=20)
+    # semantic_description_fetch_limit: int = Field(default=20) # REMOVED
     min_similarity_score_name: float = Field(default=0.7)
-    min_similarity_score_description: float = Field(default=0.65)
+    # min_similarity_score_description: float = Field(default=0.65) # REMOVED
     rrf_k: int = Field(default=60)
 
 # --- Relationship Search Specific ---
@@ -87,14 +87,14 @@ class SourceSearchConfig(BaseModel):
 class SearchResultItem(BaseModel):
     uuid: str
     name: Optional[str] = None 
-    content: Optional[str] = None 
-    description: Optional[str] = None 
+    content: Optional[str] = None # For Chunk, Source, Product (JSON string)
+    # description: Optional[str] = None # REMOVED
     fact_sentence: Optional[str] = None 
-    label: Optional[str] = None 
+    label: Optional[str] = None # For Entity
     source_entity_uuid: Optional[str] = None 
     target_entity_uuid: Optional[str] = None 
     score: float
-    result_type: Literal["Chunk", "Entity", "Relationship", "Source"] # <-- ADDED "Source"
+    result_type: Literal["Chunk", "Entity", "Relationship", "Source", "Product"] # Added Product here
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class CombinedSearchResults(BaseModel):
@@ -111,15 +111,46 @@ class MultiQueryConfig(BaseModel):
     )
     
     
-# --- Overall Search Configuration ---
+
+    
+    
+# --- NEW: Product Search Specific ---
+class ProductSearchMethod(str, Enum):
+    KEYWORD_NAME_CONTENT = "keyword_name_content_fulltext"
+    SEMANTIC_NAME = "semantic_name_vector"
+    SEMANTIC_CONTENT = "semantic_content_vector"
+
+class ProductRerankerMethod(str, Enum):
+    RRF = "reciprocal_rank_fusion"
+
+class ProductSearchConfig(BaseModel):
+    search_methods: List[ProductSearchMethod] = Field(
+        default_factory=lambda: [
+            ProductSearchMethod.KEYWORD_NAME_CONTENT,
+            ProductSearchMethod.SEMANTIC_NAME,
+            ProductSearchMethod.SEMANTIC_CONTENT,
+        ]
+    )
+    reranker: ProductRerankerMethod = ProductRerankerMethod.RRF
+    limit: int = Field(default=5, description="Final number of results to return for Product type if min_results is not dominant.")
+    min_results: int = Field(default=0, ge=0, description="Minimum number of product results to try to include, if available.")
+    keyword_fetch_limit: int = Field(default=10)
+    semantic_name_fetch_limit: int = Field(default=10)
+    semantic_content_fetch_limit: int = Field(default=10)
+    min_similarity_score_name: float = Field(default=0.7)
+    min_similarity_score_content: float = Field(default=0.65) # Content (JSON string) might need lower threshold
+    rrf_k: int = Field(default=60)
+    
+    
 class SearchConfig(BaseModel):
     chunk_config: Optional[ChunkSearchConfig] = Field(default_factory=ChunkSearchConfig)
     entity_config: Optional[EntitySearchConfig] = Field(default_factory=EntitySearchConfig)
     relationship_config: Optional[RelationshipSearchConfig] = Field(default_factory=RelationshipSearchConfig)
     source_config: Optional[SourceSearchConfig] = Field(default_factory=SourceSearchConfig) 
+    product_config: Optional[ProductSearchConfig] = Field(default_factory=ProductSearchConfig) # ADDED
     mqr_config: Optional[MultiQueryConfig] = Field(default=None, description="Configuration for Multi-Query Retrieval. If None, MQR is disabled.")
     overall_results_limit: Optional[int] = Field(
-        default=10, # Defaulting to 10, can be None if no limit is desired by default
+        default=10, 
         ge=1, 
         description="Optional overall limit for the final number of results returned by the combined search. Applied after aggregation and sorting."
-    ) # <-- ADDED
+    )

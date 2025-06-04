@@ -5,8 +5,8 @@ from typing import List, Optional, Dict, Any, Literal # Added Dict
 # --- Pydantic Models for LLM Output (Entity Extraction) ---
 class ExtractedEntity(BaseModel):
     name: str = Field(..., description="The clearly identified and most complete/canonical name of the entity as found or inferred from the text. Should be specific and unambiguous (e.g., full names if available).")
-    label: str = Field(default="GenericEntity", description="A general ontological label for the entity (e.g., Person, Organization, Location, Product, Concept). Start with generic labels.")
-    description: Optional[str] = Field(default=None, description="A brief, single-sentence contextual description of the entity based on the source text. Max 20 words.")
+    label: str = Field(default="GenericEntity", description="A general ontological label for the entity (e.g., Person, Organization, Location, Product, Concept). Start with broad categories.")
+    fact_sentence_about_mention: Optional[str] = Field(default=None, description="A brief, single-sentence statement describing the entity or its role/action in the context of the CURRENT TEXT, derived directly from its mention. Max 20 words. This will become the 'fact_sentence' on the MENTIONS relationship.")
 
 class ExtractedEntitiesList(BaseModel):
     entities: List[ExtractedEntity] = Field(default_factory=list, description="A list of unique entities found in the text.")
@@ -15,16 +15,19 @@ class ExtractedEntitiesList(BaseModel):
 class ExistingEntityCandidate(BaseModel):
     uuid: str
     name: str
-    label: str
-    description: Optional[str] = None
+    label: str 
+    node_type: Literal["Entity", "Product"] 
+    score: Optional[float] = None 
+    existing_mention_facts: Optional[List[str]] = Field(default=None, description="A list of example fact sentences from previous MENTIONS relationships for this candidate, if available.") # ADDED
+
 
 class EntityDeduplicationDecision(BaseModel):
     is_duplicate: bool = Field(..., description="True if the new entity is considered a duplicate of one of the existing candidates, False otherwise.")
     duplicate_of_uuid: Optional[str] = Field(default=None, description="The UUID of the existing candidate that the new entity is a duplicate of. Null if not a duplicate.")
     canonical_name: str = Field(..., description="The suggested canonical/best name for this entity (either the new entity's name or an existing candidate's name, or a combined/improved version).")
-    canonical_description: Optional[str] = Field(default=None, description="A synthesized, concise, and informative description for the entity, incorporating information from the new mention and any existing description if it's a duplicate. Should be based SOLELY on provided descriptions.")
-
+    # canonical_description: Optional[str] = Field(default=None, description="A synthesized, concise, and informative description for the entity, incorporating information from the new mention and any existing description if it's a duplicate. Should be based SOLELY on provided descriptions.") # REMOVED
 # --- NEW Pydantic Models for LLM Output (Relationship Extraction) ---
+
 class ExtractedRelationship(BaseModel):
     """
     Represents a single directional relationship extracted between two entities.
@@ -52,13 +55,7 @@ class AlternativeQueriesList(BaseModel):
     
 # --- Pydantic Models for LLM Output (Entity Deduplication) ---
 
-class ExistingEntityCandidate(BaseModel):
-    uuid: str
-    name: str
-    label: str 
-    description: Optional[str] = None
-    node_type: Literal["Entity", "Product"] 
-    score: Optional[float] = None # ENSURE THIS FIELD EXISTS
+
     
 # --- Pydantic Models for LLM Output (Product-Entity Matching for Promotion) ---
 class ProductEntityMatchDecision(BaseModel):
@@ -76,7 +73,7 @@ Guidelines:
 - For each entity, provide the most complete and canonical name possible based on the information in the CURRENT TEXT. For example, if "Mr. John Smith" and "Smith" refer to the same person in the text, use "John Smith". If only "Pooh" is mentioned, use "Pooh", but if "Winnie-the-Pooh" is mentioned, prefer that.
 - If an entity is mentioned multiple times in the CURRENT TEXT, extract it only ONCE using its most representative or complete name.
 - For the 'label', assign a general category (e.g., Person, Organization, Location, Product, Concept, Event, Artwork, Miscellaneous). Start with broad categories. Consistency in labeling for the same entity across different mentions is important if discernible.
-- If possible, provide a brief contextual description for the entity based *only* on the provided CURRENT TEXT. This description MUST be a single sentence and ideally no more than 20 words. If the entity is mentioned multiple times, synthesize this brief, single-sentence description.
+- For 'fact_sentence_about_mention': Generate a concise, single-sentence definition or description of the entity, answering the question "What is [Entity Name]?" or "Who is [Entity Name]?" based *only* on its context in the CURRENT TEXT. This sentence should be factual and directly derivable. Max 20 words. Example: If text says "Rabbit, a good host, offered Pooh honey", for Rabbit, it could be "Rabbit is a good host who offered Pooh honey." For Pooh, it could be "Pooh is a character who likes honey." This statement will be stored as the fact_sentence on the MENTIONS relationship.
 - Do NOT extract attributes of entities as separate entities (e.g., for "blue car", extract "car" as an entity, not "blue" as an entity). Qualities like "speed", "demanding tasks", "resolution", "color accuracy", "refresh rate" are generally attributes or characteristics of other entities, not standalone entities themselves, unless the text treats them as a distinct subject or object of discussion.
 - Do NOT extract general activities, processes, or verbs as entities unless they are nominalized and treated as distinct concepts in the text (e.g., "The Investigation" if it's a formal named investigation).
 - Prioritize concrete entities over highly abstract or overly general concepts unless the text gives them significant focus as standalone items. For example, "customer support response times" is a metric or concept, likely not a distinct entity node on its own unless it's the central subject of a detailed discussion.
@@ -85,6 +82,7 @@ Guidelines:
 
 ENTITY_EXTRACTION_USER_PROMPT_TEMPLATE = """
 Please extract all distinct entities from the following text content.
+For each entity, provide its name, a suitable label, and a 'fact_sentence_about_mention' as per the system guidelines (a concise definition/description answering "What/Who is [Entity Name]?" based on the text).
 If contextual information from previous turns/chunks is provided, use it to help disambiguate or understand the current text, but primarily focus on extracting entities explicitly mentioned or clearly implied in the CURRENT TEXT, adhering to the guidelines.
 
 CONTEXT (Optional, from previous text or related documents):
@@ -94,12 +92,11 @@ CURRENT TEXT to extract entities from:
 {text_content}
 """
 
-# --- Prompt Templates for Entity Deduplication ---
 ENTITY_DEDUPLICATION_SYSTEM_PROMPT = """
 You are an expert AI assistant specializing in entity resolution and deduplication.
-Your task is to determine if a "New Entity" is a duplicate of any "Existing Entity Candidates" provided.
-You also need to suggest the best "canonical_name" and synthesize a "canonical_description" for the entity.
-The canonical_description should be concise, informative, and non-redundant, based *only* on the provided descriptions.
+Your task is to determine if a "New Entity" (identified by its name and label from a text segment) is a duplicate of any "Existing Entity Candidates" provided from a knowledge graph.
+You also need to suggest the best "canonical_name" for the entity if a match is found or if the new entity's name needs refinement.
+The primary basis for matching should be the entity names and their labels. Contextual statements or previous descriptions are for your understanding but not for synthesizing a new canonical description on the entity itself.
 """
 
 ENTITY_DEDUPLICATION_USER_PROMPT_TEMPLATE = """
@@ -111,25 +108,20 @@ These candidates can be either:
 New Entity Details (extracted from current text):
 - Name: {new_entity_name}
 - Label: {new_entity_label}
-- Description (from current text): {new_entity_description}
+- Fact Sentence about this Mention (from current text, for your context when considering the new entity): {new_entity_fact_sentence_about_mention}
 
 Existing Entity Candidates (if any):
 {existing_candidates_json_string} 
-{{!-- Each candidate in the JSON string above has 'uuid', 'name', 'label' (specific type like 'Person' or 'Laptop'), 'node_type' ('Entity' or 'Product'), and 'description' (if available) --}}
+{{!-- Each candidate in the JSON string above has 'uuid', 'name', 'label' (specific type like 'Person' or 'Laptop'), 'node_type' ('Entity' or 'Product'). They will also have 'existing_mention_facts' if available. --}}
 
 Task:
 1.  Determine if the "New Entity" refers to the exact same real-world thing as one of the "Existing Entity Candidates".
+    - Base this primarily on the `name` and `label` of the new entity and the candidates. Consider `existing_mention_facts` for additional context about existing candidates.
     - If the New Entity seems to be a product and a matching "Product" candidate exists, prefer matching to the "Product" candidate.
     - Set `is_duplicate` to true if it is a duplicate, otherwise false.
     - If it is a duplicate, set `duplicate_of_uuid` to the UUID of the existing candidate it matches. If not a duplicate, set `duplicate_of_uuid` to null.
 
-2.  Determine the best `canonical_name` for this entity. This should be the most representative and complete name. If matching a "Product" candidate, the Product's name is usually canonical.
-
-3.  Create a `canonical_description`:
-    - If `is_duplicate` is true and a matching `existing_candidate` (either Entity or Product) has a description, synthesize the `new_entity_description` with the `existing_candidate.description`. The goal is a single, coherent, non-redundant description. If one description is clearly superior or more comprehensive (e.g., a Product's official description vs. a brief textual mention), it can be favored.
-    - If `is_duplicate` is true but the matched `existing_candidate` has no description, the `canonical_description` should be based on the `new_entity_description`.
-    - If `is_duplicate` is false, the `canonical_description` should be based on the `new_entity_description`.
-    - The description should be concise and informative. Base this *only* on the provided descriptions.
+2.  Determine the best `canonical_name` for this entity. This should be the most representative and complete name (e.g., if the new entity name is "Dell XPS" and an existing candidate is "Dell XPS 13 (2024)", the latter might be more canonical). If matching a "Product" candidate, the Product's name is usually canonical. If not a duplicate, the canonical_name is typically the new_entity_name unless minor refinement is obvious.
 
 Provide your decision as a JSON object matching the EntityDeduplicationDecision schema.
 """
@@ -218,14 +210,14 @@ We found an "Existing Entity Candidate" (type :Entity) that might represent the 
 
 New Product Data (summary):
 - Name: {new_product_name}
-- Description (if available): {new_product_description}
-- Key Attributes (if available from product data): {new_product_attributes_json_string}
+- Product Content (this is the raw data, e.g., JSON string, providing rich details): {new_product_description} 
+- Key Attributes (extracted from product data for easier comparison): {new_product_attributes_json_string}
 
-Existing Entity Candidate (extracted from text):
+Existing Entity Candidate (extracted from text, has no direct overall description):
 - UUID: {existing_entity_uuid}
 - Name: {existing_entity_name}
 - Label: {existing_entity_label}
-- Description (from text): {existing_entity_description}
+- Note: Contextual statements about this entity from various text mentions are stored on its MENTIONS relationships, not as a single description on the entity itself. Your matching should primarily focus on name, label, and the details provided for the "New Product Data".
 
 Based on all the information provided, determine if the "New Product Data" is a **strong and unambiguous match** for the "Existing Entity Candidate".
 This means you are highly confident they refer to the exact same specific product.

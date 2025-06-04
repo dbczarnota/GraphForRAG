@@ -95,7 +95,8 @@ class EntityResolver:
                 combined_candidates.append(
                     ExistingEntityCandidate(
                         uuid=record["uuid"], name=record["name"], label=record["label"], 
-                        description=record.get("description"), node_type="Entity", score=record["score"] # Include score
+                        node_type="Entity", score=record["score"],
+                        existing_mention_facts=record.get("mention_facts") # Populate new field
                     )
                 )
             
@@ -105,11 +106,11 @@ class EntityResolver:
                 "index_name_param": product_index_name,
                 "top_k_param": self.top_k_candidates,
                 "embedding_vector_param": embedding_vector_data,
-                "min_similarity_score_param": self.similarity_threshold # Can use same or different threshold
+                "min_similarity_score_param": self.similarity_threshold 
             }
             logger.debug(f"Searching for similar Products for '{entity_name}' using index '{product_index_name}'")
             product_results, _, _ = await self.driver.execute_query( # type: ignore
-                cypher_queries.FIND_SIMILAR_PRODUCTS_BY_VECTOR, # Use the new query
+                cypher_queries.FIND_SIMILAR_PRODUCTS_BY_VECTOR, 
                 product_params,
                 database_=self.database
             )
@@ -117,19 +118,14 @@ class EntityResolver:
                 combined_candidates.append(
                     ExistingEntityCandidate(
                         uuid=record["uuid"], name=record["name"],
-                        label=record.get("label") or "Product", # Use category or default to 'Product' as label
-                        description=record.get("description"), node_type="Product", score=record["score"] # Include score
+                        label=record.get("label") or "Product", 
+                        node_type="Product", score=record["score"],
+                        existing_mention_facts=record.get("mention_facts") # Populate new field
                     )
                 )
 
-            # Sort all combined candidates by score
             combined_candidates.sort(key=lambda x: x.score if x.score is not None else 0.0, reverse=True)
             
-            # Limit to top_k_candidates overall after combining and sorting
-            # Deduplication by UUID happens implicitly if candidates from Entity and Product searches have same UUID (unlikely)
-            # but it's more about presenting a mixed list of top candidates.
-            # If strict deduplication by name is needed before LLM, that's a different step.
-            # For now, we take the top overall candidates based on their individual search scores.
             final_candidates = []
             seen_uuids = set()
             for cand in combined_candidates:
@@ -162,41 +158,39 @@ class EntityResolver:
         fallback_decision = EntityDeduplicationDecision(
             is_duplicate=False, 
             duplicate_of_uuid=None, 
-            canonical_name=new_entity.name,
-            canonical_description=new_entity.description 
+            canonical_name=new_entity.name
         )
 
         if not existing_candidates:
             logger.debug("No similar existing candidates found. Treating as new entity.")
-            logger.debug(f"resolve_entity RETURNING (no candidates): decision={fallback_decision!r}, gen_usage={final_generative_usage!r}, embed_usage={final_embedding_usage!r}")
             return fallback_decision, final_generative_usage, final_embedding_usage
 
-        candidates_json_string_list = []
+        # Format candidates for the prompt, now including existing_mention_facts
+        candidates_prompt_parts = []
         for idx, cand_item in enumerate(existing_candidates):
-            # logger.debug(f"Processing candidate {idx}: type={type(cand_item)}, content={cand_item!r}") 
-            if not hasattr(cand_item, 'model_dump'):
-                logger.error(f"Candidate {idx} is a {type(cand_item)} and does not have model_dump. Content: {cand_item!r}")
-                continue 
-            try:
-                dumped_model = cand_item.model_dump(exclude_none=True)
-                candidates_json_string_list.append(json.dumps(dumped_model))
-            except Exception as e_dump:
-                logger.error(f"Error dumping candidate {idx} ({type(cand_item)}): {e_dump}. Content: {cand_item!r}", exc_info=True)
-                continue
+            candidate_dict = {
+                "uuid": cand_item.uuid,
+                "name": cand_item.name,
+                "label": cand_item.label,
+                "node_type": cand_item.node_type,
+                "score": round(cand_item.score, 4) if cand_item.score is not None else None,
+                "existing_mention_facts": cand_item.existing_mention_facts if cand_item.existing_mention_facts else []
+            }
+            candidates_prompt_parts.append(f"- Candidate {idx+1}: {json.dumps(candidate_dict, indent=2)}")
         
-        existing_candidates_prompt_str = "\n".join(
-            f"- Candidate {idx+1}: {json_str}" for idx, json_str in enumerate(candidates_json_string_list)
-        )
+        existing_candidates_prompt_str = "\n".join(candidates_prompt_parts)
         if not existing_candidates_prompt_str:
-             existing_candidates_prompt_str = "No semantically similar candidates found in the knowledge graph (after filtering problematic ones)."
+             existing_candidates_prompt_str = "No semantically similar candidates found in the knowledge graph."
+        
         user_prompt = ENTITY_DEDUPLICATION_USER_PROMPT_TEMPLATE.format(
             new_entity_name=new_entity.name,
             new_entity_label=new_entity.label,
-            new_entity_description=new_entity.description or "No description provided.",
+            new_entity_fact_sentence_about_mention=new_entity.fact_sentence_about_mention or "No specific fact sentence provided for this new mention.",
             existing_candidates_json_string=existing_candidates_prompt_str
         )
-        logger.debug(f"Attempting entity deduplication with LLM. New: '{new_entity.name}'. Candidates considered: {len(candidates_json_string_list)}")
+        logger.debug(f"Attempting entity deduplication with LLM. New: '{new_entity.name}'. Candidates considered: {len(existing_candidates)}. Prompt includes existing mention facts.")
 
+        # ... (rest of the method: LLM call, processing results) ...
         agent_generative_usage: Optional[Usage] = None
         try:
             agent_result_object = await self.deduplication_agent.run(user_prompt=user_prompt)
@@ -212,7 +206,6 @@ class EntityResolver:
             if agent_result_object and hasattr(agent_result_object, 'output'):
                 if isinstance(agent_result_object.output, EntityDeduplicationDecision):
                     decision = agent_result_object.output
-                    logger.debug(f"resolve_entity RETURNING (LLM success): decision={decision!r}, gen_usage={final_generative_usage!r}, embed_usage={final_embedding_usage!r}")
                     return decision, final_generative_usage, final_embedding_usage
                 else:
                     logger.error(f"Deduplication LLM call did not return expected EntityDeduplicationDecision.")
@@ -222,23 +215,21 @@ class EntityResolver:
         except Exception as e:
             logger.error(f"Error during LLM deduplication call for '{new_entity.name}': {e}", exc_info=True)
 
-        logger.debug(f"resolve_entity RETURNING (fallback/error path): decision={fallback_decision!r}, gen_usage={final_generative_usage!r}, embed_usage={final_embedding_usage!r}")
         return fallback_decision, final_generative_usage, final_embedding_usage
         
         
     async def find_matching_entity_for_product_promotion(
         self,
         new_product_name: str,
-        new_product_description: Optional[str],
+        new_product_description: Optional[str], # This is the Product.content (JSON string)
         new_product_attributes: Optional[Dict[str, Any]] 
-    ) -> Tuple[Optional[str], Optional[Usage], Optional[Usage]]: # Returns (matched_uuid, generative_usage, embedding_usage)
+    ) -> Tuple[Optional[str], Optional[Usage], Optional[Usage]]: 
         
         logger.debug(f"Looking for existing Entity to promote for new product: '{new_product_name}'")
         
         final_generative_usage: Usage = Usage()
         final_embedding_usage: Usage = Usage()
         
-        # Step 1: Find potential :Entity candidates using vector search on name
         candidates, name_search_embedding_usage = await self._find_similar_existing_entities(new_product_name)
         if name_search_embedding_usage:
             final_embedding_usage += name_search_embedding_usage # type: ignore
@@ -249,25 +240,26 @@ class EntityResolver:
             logger.debug(f"No existing :Entity candidates found for potential promotion for product '{new_product_name}'.")
             return None, final_generative_usage, final_embedding_usage
 
-        # For simplicity, consider the top scoring :Entity candidate.
         top_entity_candidate = entity_candidates[0] 
         
         logger.info(f"Potential :Entity candidate for promotion: '{top_entity_candidate.name}' (UUID: {top_entity_candidate.uuid}) for new product '{new_product_name}'. Invoking LLM for match decision.")
 
         new_product_attributes_str = json.dumps(new_product_attributes) if new_product_attributes else "Not provided"
 
+        # Since ExistingEntityCandidate no longer has a description, the prompt needs to be updated
+        # to reflect that it might not be available, or we decide not to pass it.
+        # The prompt PRODUCT_ENTITY_MATCH_USER_PROMPT_TEMPLATE refers to existing_entity_description.
+        # Let's pass "Not available" for now.
         user_prompt = PRODUCT_ENTITY_MATCH_USER_PROMPT_TEMPLATE.format(
             new_product_name=new_product_name,
-            new_product_description=new_product_description or "Not provided.",
+            new_product_description=new_product_description or "Not provided.", # This is product.content (JSON string)
             new_product_attributes_json_string=new_product_attributes_str,
             existing_entity_uuid=top_entity_candidate.uuid,
             existing_entity_name=top_entity_candidate.name,
             existing_entity_label=top_entity_candidate.label,
-            existing_entity_description=top_entity_candidate.description or "Not provided."
+            existing_entity_description="Contextual statements for this entity are on its MENTIONS relationships, not directly on the entity." # Updated this part
         )
 
-        # Use a temporary agent for this specific task, or ensure self.deduplication_agent is suitable
-        # For now, creating a specific agent for clarity.
         match_agent = Agent(
             output_type=ProductEntityMatchDecision,
             model=self.llm_client, 

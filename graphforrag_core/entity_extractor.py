@@ -45,7 +45,7 @@ class EntityExtractor:
         self, 
         text_content: str, 
         context_text: Optional[str] = None
-    ) -> Tuple[ExtractedEntitiesList, Optional[Usage]]: # <-- MODIFIED return type
+    ) -> Tuple[ExtractedEntitiesList, Optional[Usage]]: 
         if not text_content.strip():
             logger.warning("Received empty text_content for entity extraction. Returning empty list and no usage.")
             return ExtractedEntitiesList(entities=[]), None
@@ -68,16 +68,16 @@ class EntityExtractor:
                         if isinstance(usage_data_from_method, Usage):
                              current_op_usage = usage_data_from_method
                     except Exception:
-                        pass # Ignore if .usage() fails or returns wrong type
+                        pass 
 
             if agent_result_object and hasattr(agent_result_object, 'output'):
                 if isinstance(agent_result_object.output, ExtractedEntitiesList):
                     extracted_data: ExtractedEntitiesList = agent_result_object.output
-                    # logger.debug(f"Successfully extracted {len(extracted_data.entities)} entities.") # Optional: keep for detailed logs
+                    # logger.debug(f"Successfully extracted {len(extracted_data.entities)} entities. First entity contextual_statement: {extracted_data.entities[0].contextual_statement if extracted_data.entities else 'N/A'}")
                     return extracted_data, current_op_usage
                 else:
                     logger.error(f"Entity extraction result's 'output' attribute is not of type ExtractedEntitiesList.")
-                    return ExtractedEntitiesList(entities=[]), current_op_usage # Return usage even if output parsing failed
+                    return ExtractedEntitiesList(entities=[]), current_op_usage 
             else:
                 logger.error(f"Entity extraction did not return a valid result object or 'output' attribute.")
                 return ExtractedEntitiesList(entities=[]), current_op_usage

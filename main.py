@@ -8,9 +8,11 @@ from graphforrag_core.search_types import (
     EntitySearchConfig, EntitySearchMethod, 
     RelationshipSearchConfig, RelationshipSearchMethod, 
     SourceSearchConfig, SourceSearchMethod, 
+    ProductSearchConfig, ProductSearchMethod, # ADDED ProductSearchConfig, ProductSearchMethod
     CombinedSearchResults, SearchResultItem,
     MultiQueryConfig 
 )
+
 from dotenv import load_dotenv
 import os
 import logging
@@ -80,7 +82,7 @@ async def main():
         timings["graphforrag_init_total"] = (time.perf_counter() - graph_init_overall_start_time) * 1000
         logger.info(f"MAIN: GraphForRAG instance creation took {timings['graphforrag_init_total']:.2f} ms")
         
-        run_data_setup = False 
+        run_data_setup = True 
         if run_data_setup:
             logger.info(f"Schema/Data setup started at: {get_current_time_ms()}")
             setup_overall_start_time = time.perf_counter()
@@ -94,15 +96,14 @@ async def main():
 
             logger.info(f"Data ingestion started at: {get_current_time_ms()}")
             ingestion_overall_start_time = time.perf_counter()
-            for i, source_set_info in enumerate(source_data_sets):
+            for i, source_set_info in enumerate(source_data_sets): # source_set_info is the whole block
                 s_time = time.perf_counter()
                 await graph.add_documents_from_source(
-                    source_identifier=source_set_info["identifier"],
-                    documents_data=source_set_info["chunks"],
-                    source_content=source_set_info.get("source_content"),
-                    source_dynamic_metadata=source_set_info["source_metadata"]
+                    source_data_block=source_set_info # PASS THE ENTIRE DICTIONARY
                 )
-                timings[f"data_ingestion_source_{i+1}"] = (time.perf_counter() - s_time) * 1000
+                # Calculate timing based on source_set_info['name'] if needed for logging key
+                source_name_for_timing = source_set_info.get("name", f"unknown_source_{i+1}")
+                timings[f"data_ingestion_source_{source_name_for_timing}"] = (time.perf_counter() - s_time) * 1000
             timings["data_ingestion_total"] = (time.perf_counter() - ingestion_overall_start_time) * 1000
             logger.info(f"Data ingestion finished. Duration: {timings['data_ingestion_total']:.2f} ms")
             logger.info("\n--- All document sets processed ---")
@@ -137,32 +138,29 @@ async def main():
         comprehensive_search_config = SearchConfig(
             chunk_config=ChunkSearchConfig(
                 search_methods=[ChunkSearchMethod.KEYWORD, ChunkSearchMethod.SEMANTIC],
-                limit=3, # Max chunks to consider from *each* MQR query pass after chunk-specific reranking
-                min_results=2, # Try to have at least 2 chunks in the *final* overall results, if available
+                limit=3, 
+                min_results=2, 
                 keyword_fetch_limit=10, 
                 semantic_fetch_limit=10,
-                min_similarity_score=0.7,
+                min_similarity_score=0.7, # Adjusted from 0.5 for chunks
                 rrf_k=60
             ),
             entity_config=EntitySearchConfig(
-                search_methods=[
-                    EntitySearchMethod.KEYWORD_NAME_DESC, 
+                search_methods=[ # SEMANTIC_DESCRIPTION is removed
+                    EntitySearchMethod.KEYWORD_NAME, 
                     EntitySearchMethod.SEMANTIC_NAME, 
-                    EntitySearchMethod.SEMANTIC_DESCRIPTION
                 ],
-                limit=4, # Max entities to consider from *each* MQR query pass
-                min_results=1, # Try to have at least 1 entity in the *final* overall results
+                limit=4, 
+                min_results=1, 
                 keyword_fetch_limit=15, 
                 semantic_name_fetch_limit=15, 
-                semantic_description_fetch_limit=15,
                 min_similarity_score_name=0.7,
-                min_similarity_score_description=0.65,
                 rrf_k=60
             ),
             relationship_config=RelationshipSearchConfig(
                 search_methods=[RelationshipSearchMethod.KEYWORD_FACT, RelationshipSearchMethod.SEMANTIC_FACT],
-                limit=3, # Max relationships to consider from *each* MQR query pass
-                min_results=2, # No minimum guarantee for relationships in this example
+                limit=3, 
+                min_results=1, # Updated min_results for relationships example
                 keyword_fetch_limit=10, 
                 semantic_fetch_limit=10,
                 min_similarity_score=0.7,
@@ -170,18 +168,33 @@ async def main():
             ),
             source_config=SourceSearchConfig( 
                 search_methods=[SourceSearchMethod.KEYWORD_CONTENT, SourceSearchMethod.SEMANTIC_CONTENT],
-                limit=2, # Max sources to consider from *each* MQR query pass
-                min_results=1, # Try to have at least 1 source document in the *final* overall results
+                limit=2, 
+                min_results=1, 
                 keyword_fetch_limit=5, 
                 semantic_fetch_limit=5,
                 min_similarity_score=0.7,
+                rrf_k=60
+            ),
+            product_config=ProductSearchConfig( # ADDED product_config section
+                search_methods=[
+                    ProductSearchMethod.KEYWORD_NAME_CONTENT,
+                    ProductSearchMethod.SEMANTIC_NAME,
+                    ProductSearchMethod.SEMANTIC_CONTENT
+                ],
+                limit=3, # Max products to consider from *each* MQR query pass
+                min_results=1, # Try to have at least 1 product in the *final* overall results
+                keyword_fetch_limit=10,
+                semantic_name_fetch_limit=10,
+                semantic_content_fetch_limit=10,
+                min_similarity_score_name=0.7,
+                min_similarity_score_content=0.65, # Content (JSON string) might need lower threshold
                 rrf_k=60
             ),
             mqr_config=MultiQueryConfig( 
                 enabled=True, 
                 max_alternative_questions=2 
             ),
-            overall_results_limit=10 # Cap the *final* combined list to 5 items
+            overall_results_limit=10 
         )
         
         config_dump_str = comprehensive_search_config.model_dump_json(indent=2, exclude_none=True)
@@ -206,8 +219,9 @@ async def main():
                         logger.info(f"    UUID: {item.uuid}")
                         if item.name: logger.info(f"    Name: {item.name}")
                         if item.content: logger.info(f"    Content Snippet: {item.content[:100]}...")
-                        if item.description: logger.info(f"    Description: {item.description[:100]}...")
+                        # if item.description: logger.info(f"    Description: {item.description[:100]}...") # REMOVED THIS LINE
                         if item.fact_sentence: logger.info(f"    Fact: {item.fact_sentence}")
+                        if item.label and item.result_type == "Entity": logger.info(f"    Label: {item.label}") # Added condition for Entity label
                         if item.metadata: logger.info(f"    Metadata: {item.metadata}")
                 else:
                     logger.info(f"No combined results found for '{full_search_query}'.")

@@ -13,7 +13,7 @@ from .relationship_extractor import RelationshipExtractor
 from .node_manager import NodeManager
 from files.llm_models import setup_fallback_model
 from pydantic_ai.usage import Usage
-
+from config import cypher_queries # ADD THIS IMPORT
 from .build_knowledge_base import add_documents_to_knowledge_base 
 from .types import ResolvedEntityInfo
 from .search_manager import SearchManager
@@ -23,6 +23,7 @@ from .search_types import (
     EntitySearchConfig, EntitySearchMethod, 
     RelationshipSearchConfig, RelationshipSearchMethod,
     SourceSearchConfig, SourceSearchMethod, 
+    ProductSearchConfig, ProductSearchMethod, # ADDED ProductSearchConfig and ProductSearchMethod
     CombinedSearchResults, 
     SearchResultItem,
     MultiQueryConfig
@@ -157,39 +158,47 @@ class GraphForRAG:
         await self.schema_manager.ensure_indices_and_constraints()
 
     async def clear_all_data(self):
-        await self.schema_manager.clear_all_data()
+            # await self.schema_manager.clear_all_data() # Original problematic line
+            logger.warning("GraphForRAG: Attempting to delete ALL nodes and relationships from the database directly...")
+            try:
+                # Directly use the driver and cypher query, similar to how SchemaManager does it
+                async with self.driver.session(database=self.database) as session:
+                    await session.run(cypher_queries.CLEAR_ALL_NODES_AND_RELATIONSHIPS)
+                logger.info("GraphForRAG: Successfully cleared all data directly.")
+            except Exception as e:
+                logger.error(f"GraphForRAG: Error clearing all data directly: {e}", exc_info=True)
+                raise
 
     async def clear_all_known_indexes_and_constraints(self):
         await self.schema_manager.clear_all_known_indexes_and_constraints()
     
     async def add_documents_from_source(
         self,
-        source_identifier: str,
-        documents_data: List[dict], 
-        source_content: Optional[str] = None,
-        source_dynamic_metadata: Optional[dict] = None,
-        allow_same_name_chunks_for_this_source: bool = True
+        source_data_block: dict, # CHANGED: was source_identifier, documents_data, etc.
+        # source_identifier: str, # REMOVED
+        # documents_data: List[dict],  # REMOVED
+        # source_content: Optional[str] = None, # REMOVED
+        # source_dynamic_metadata: Optional[dict] = None, # REMOVED
+        allow_same_name_chunks_for_this_source: bool = True # This can probably be removed too if not used
     ) -> Tuple[Optional[str], List[str]]:
         # Ensure LLM services are ready if they'll be needed during ingestion
         _ = self.entity_extractor 
         _ = self.entity_resolver
         _ = self.relationship_extractor
         
-        # add_documents_to_knowledge_base now returns four items
+        # add_documents_to_knowledge_base now expects the whole source_definition_block
         source_node_uuid, added_chunk_uuids, gen_usage_for_set, embed_usage_for_set = await add_documents_to_knowledge_base(
-            source_identifier=source_identifier,
-            documents_data=documents_data,
+            source_definition_block=source_data_block, # PASS THE WHOLE BLOCK
             node_manager=self.node_manager,
             embedder=self.embedder,
             entity_extractor=self.entity_extractor, 
             entity_resolver=self.entity_resolver,   
-            relationship_extractor=self.relationship_extractor, 
-            source_content=source_content,
-            source_dynamic_metadata=source_dynamic_metadata,
-            allow_same_name_chunks_for_this_source=allow_same_name_chunks_for_this_source
+            relationship_extractor=self.relationship_extractor
+            # source_content and source_dynamic_metadata are now inside source_data_block
+            # allow_same_name_chunks_for_this_source is not used by add_documents_to_knowledge_base
         )
-        self._accumulate_generative_usage(gen_usage_for_set) # Correctly accumulate generative usage
-        self._accumulate_embedding_usage(embed_usage_for_set)   # Correctly accumulate embedding usage
+        self._accumulate_generative_usage(gen_usage_for_set)
+        self._accumulate_embedding_usage(embed_usage_for_set)
         return source_node_uuid, added_chunk_uuids
 
     async def search(
@@ -231,8 +240,12 @@ class GraphForRAG:
             needs_embedding = False
             if config.source_config and SourceSearchMethod.SEMANTIC_CONTENT in config.source_config.search_methods: needs_embedding = True
             if not needs_embedding and config.chunk_config and ChunkSearchMethod.SEMANTIC in config.chunk_config.search_methods: needs_embedding = True
-            if not needs_embedding and config.entity_config and (EntitySearchMethod.SEMANTIC_NAME in config.entity_config.search_methods or EntitySearchMethod.SEMANTIC_DESCRIPTION in config.entity_config.search_methods): needs_embedding = True
+            if not needs_embedding and config.entity_config and EntitySearchMethod.SEMANTIC_NAME in config.entity_config.search_methods: needs_embedding = True # Entity SEMANTIC_DESCRIPTION removed
             if not needs_embedding and config.relationship_config and RelationshipSearchMethod.SEMANTIC_FACT in config.relationship_config.search_methods: needs_embedding = True
+            if not needs_embedding and config.product_config: # ADDED check for product semantic search
+                if ProductSearchMethod.SEMANTIC_NAME in config.product_config.search_methods or \
+                   ProductSearchMethod.SEMANTIC_CONTENT in config.product_config.search_methods:
+                    needs_embedding = True
             
             if needs_embedding:
                 queries_requiring_embedding.append(q_text)
@@ -274,8 +287,7 @@ class GraphForRAG:
             query_log_prefix = "Original Query" if is_original_query else f"MQR Query {i+1}"
             logger.info(f"--- {query_log_prefix}: '{current_query_text_for_processing}' ---")
             current_query_embedding = query_to_embedding_map.get(current_query_text_for_processing)
-            # ... (logging for missing embedding if needed) ...
-
+            
             sequential_execution_start_time = time.perf_counter()
             if config.source_config:
                 s_time = time.perf_counter(); res = await self.search_manager.search_sources(current_query_text_for_processing, config.source_config, current_query_embedding)
@@ -293,6 +305,10 @@ class GraphForRAG:
                 s_time = time.perf_counter(); res = await self.search_manager.search_relationships(current_query_text_for_processing, config.relationship_config, current_query_embedding)
                 logger.debug(f"GRAPHFORRAG.search ({query_log_prefix}, TIMING): search_relationships call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
                 if res: all_raw_results_from_search_manager.extend(res)
+            if config.product_config: # ADDED product search call
+                s_time = time.perf_counter(); res = await self.search_manager.search_products(current_query_text_for_processing, config.product_config, current_query_embedding)
+                logger.debug(f"GRAPHFORRAG.search ({query_log_prefix}, TIMING): search_products call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
+                if res: all_raw_results_from_search_manager.extend(res)
             
             current_query_sequential_search_duration = (time.perf_counter() - sequential_execution_start_time) * 1000
             total_sequential_search_calls_duration += current_query_sequential_search_duration
@@ -303,18 +319,15 @@ class GraphForRAG:
         logger.info(f"GRAPHFORRAG.search: Total (batch) embedding generation time across all queries: {total_embedding_generation_duration:.2f} ms.")
         logger.info(f"GRAPHFORRAG.search: Total time for all sequential search calls across all queries: {total_sequential_search_calls_duration:.2f} ms.")
         
-        # 1. Initial Deduplication of all raw results
         deduplicated_scored_items_map: Dict[str, SearchResultItem] = {}
         if all_raw_results_from_search_manager:
             for item in all_raw_results_from_search_manager:
                 if item.uuid not in deduplicated_scored_items_map or item.score > deduplicated_scored_items_map[item.uuid].score:
                     deduplicated_scored_items_map[item.uuid] = item
         
-        # Convert map to list and sort by score for further processing
         deduplicated_and_sorted_items = sorted(deduplicated_scored_items_map.values(), key=lambda x: x.score, reverse=True)
         logger.debug(f"GRAPHFORRAG.search: After initial deduplication, {len(deduplicated_and_sorted_items)} unique items sorted by score.")
 
-        # 2. Guarantee Minimums
         final_results_list: List[SearchResultItem] = []
         added_uuids_for_final_list: set[str] = set()
 
@@ -327,6 +340,9 @@ class GraphForRAG:
             result_type_configs.append({"type": "Relationship", "min": config.relationship_config.min_results, "cfg": config.relationship_config})
         if config.source_config and config.source_config.min_results > 0:
             result_type_configs.append({"type": "Source", "min": config.source_config.min_results, "cfg": config.source_config})
+        if config.product_config and config.product_config.min_results > 0: # ADDED product min_results check
+            result_type_configs.append({"type": "Product", "min": config.product_config.min_results, "cfg": config.product_config})
+
 
         for type_info in result_type_configs:
             current_type = type_info["type"]
@@ -339,11 +355,9 @@ class GraphForRAG:
                         added_uuids_for_final_list.add(item.uuid)
                         count_for_type += 1
                     else:
-                        break # Met minimum for this type
+                        break 
             logger.debug(f"Guaranteed {count_for_type}/{min_to_add} for type '{current_type}'. Total guaranteed: {len(final_results_list)}")
 
-        # 3. Fill Remaining up to overall_results_limit
-        # Items in deduplicated_and_sorted_items are already score-sorted.
         if config.overall_results_limit is None or len(final_results_list) < config.overall_results_limit:
             limit_for_fill = config.overall_results_limit if config.overall_results_limit is not None else float('inf')
             
@@ -355,7 +369,6 @@ class GraphForRAG:
                     added_uuids_for_final_list.add(item.uuid)
             logger.debug(f"Filled remaining. Total items before final sort: {len(final_results_list)}")
 
-        # 4. Final Sort and Limit (if overall_results_limit was exceeded by minimums or no limit was initially applied for fill)
         final_results_list.sort(key=lambda x: x.score, reverse=True)
         
         if config.overall_results_limit is not None and len(final_results_list) > config.overall_results_limit:

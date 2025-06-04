@@ -7,13 +7,14 @@ from collections import defaultdict
 import time 
 import re 
 
-from config import cypher_queries # Now imports the refactored queries
+from config import cypher_queries 
 from .embedder_client import EmbedderClient
 from .search_types import (
     ChunkSearchConfig, ChunkSearchMethod, ChunkRerankerMethod,
     EntitySearchConfig, EntitySearchMethod, EntityRerankerMethod,
     RelationshipSearchConfig, RelationshipSearchMethod, RelationshipRerankerMethod,
     SourceSearchConfig, SourceSearchMethod, SourceRerankerMethod, 
+    ProductSearchConfig, ProductSearchMethod, ProductRerankerMethod, # ADDED Product... types
     SearchResultItem
 )
 
@@ -97,14 +98,14 @@ class SearchManager:
         params: Dict[str, Any] = {}
         keyword_part_included = False
         semantic_name_part_included = False
-        semantic_desc_part_included = False
-        
-        if EntitySearchMethod.KEYWORD_NAME_DESC in config.search_methods and query_text.strip():
+        # semantic_desc_part_included = False # This method is removed
+
+        if EntitySearchMethod.KEYWORD_NAME in config.search_methods and query_text.strip(): # Changed from KEYWORD_NAME_DESC
             lucene_query_str = construct_lucene_query(query_text)
             if lucene_query_str:
                 params["keyword_query_string_entity"] = lucene_query_str
                 params["keyword_limit_param_entity"] = config.keyword_fetch_limit
-                params["index_name_keyword_entity"] = "entity_name_desc_ft"
+                params["index_name_keyword_entity"] = "entity_name_ft" # Uses the new index for name only
                 cypher_parts.append(cypher_queries.ENTITY_SEARCH_KEYWORD_PART)
                 keyword_part_included = True
             else:
@@ -120,15 +121,7 @@ class SearchManager:
         else:
             logger.debug("_fetch_entities_combined: Semantic Name part skipped.")
 
-        if EntitySearchMethod.SEMANTIC_DESCRIPTION in config.search_methods and query_embedding:
-            params["semantic_embedding_entity_desc"] = query_embedding
-            params["semantic_limit_entity_desc"] = config.semantic_description_fetch_limit
-            params["semantic_min_score_entity_desc"] = config.min_similarity_score_description
-            params["index_name_semantic_entity_desc"] = "entity_description_embedding_vector"
-            cypher_parts.append(cypher_queries.ENTITY_SEARCH_SEMANTIC_DESCRIPTION_PART)
-            semantic_desc_part_included = True
-        else:
-            logger.debug("_fetch_entities_combined: Semantic Description part skipped.")
+        # SEMANTIC_DESCRIPTION part is removed as entities no longer have content/description field for this.
             
         if not cypher_parts:
             logger.info("_fetch_entities_combined: No search parts to execute.")
@@ -137,7 +130,7 @@ class SearchManager:
         final_query = " UNION ALL ".join(cypher_parts)
         try:
             param_keys_for_log = {k: (type(v).__name__ if not isinstance(v, list) else f"list_len_{len(v)}") for k,v in params.items()}
-            logger.debug(f"_fetch_entities_combined: Executing with {len(cypher_parts)} part(s) (K: {keyword_part_included}, SN: {semantic_name_part_included}, SD: {semantic_desc_part_included}). Query:\n{final_query}\nParams (keys and types/lengths): {param_keys_for_log}")
+            logger.debug(f"_fetch_entities_combined: Executing with {len(cypher_parts)} part(s) (K: {keyword_part_included}, SN: {semantic_name_part_included}). Query:\n{final_query}\nParams (keys and types/lengths): {param_keys_for_log}") # Removed SD from log
             fetch_start_time = time.perf_counter()
             results, summary, _ = await self.driver.execute_query(final_query, params, database_=self.database)
             fetch_duration = (time.perf_counter() - fetch_start_time) * 1000
@@ -294,7 +287,7 @@ class SearchManager:
                     "chunk_number": data.get("chunk_number")
                 })
             elif result_type == "Entity":
-                item_data_for_pydantic["description"] = data.get("description")
+                # item_data_for_pydantic["description"] = data.get("description") # Entity has no description/content now
                 item_data_for_pydantic["label"] = data.get("label")
             elif result_type == "Relationship":
                 item_data_for_pydantic["fact_sentence"] = data.get("fact_sentence")
@@ -302,7 +295,13 @@ class SearchManager:
                 item_data_for_pydantic["target_entity_uuid"] = data.get("target_entity_uuid")
             elif result_type == "Source": 
                 item_data_for_pydantic["content"] = data.get("content")
-            
+            elif result_type == "Product": # ADDED Product handling
+                item_data_for_pydantic["content"] = data.get("content") # JSON string
+                if data.get("sku") is not None:
+                    item_data_for_pydantic["metadata"]["sku"] = data.get("sku")
+                if data.get("price") is not None:
+                    item_data_for_pydantic["metadata"]["price"] = data.get("price")
+
             final_results.append(SearchResultItem(**item_data_for_pydantic))
         return final_results
 
@@ -384,8 +383,12 @@ class SearchManager:
             combined_method_results.sort(key=lambda x: x.get('score', 0.0), reverse=True)
             final_items = [
                 SearchResultItem(
-                    uuid=data["uuid"], name=data.get("name"), description=data.get("description"),
-                    label=data.get("label"), score=data.get("score", 0.0), result_type="Entity",
+                    uuid=data["uuid"], 
+                    name=data.get("name"), 
+                    # description=data.get("description"), # REMOVED
+                    label=data.get("label"), 
+                    score=data.get("score", 0.0), 
+                    result_type="Entity",
                     metadata={"method_source": data.get("method_source", "unknown")}
                 ) for data in combined_method_results[:config.limit]
             ]
@@ -478,3 +481,115 @@ class SearchManager:
         duration = (time.perf_counter() - start_time) * 1000
         logger.info(f"Source search completed in {duration:.2f} ms, found {len(final_items)} items.")
         return final_items
+    
+    async def _fetch_products_combined(
+        self,
+        query_text: str,
+        config: ProductSearchConfig,
+        query_embedding: Optional[List[float]]
+    ) -> List[Dict[str, Any]]:
+        cypher_parts = []
+        params: Dict[str, Any] = {}
+        keyword_part_included = False
+        semantic_name_part_included = False
+        semantic_content_part_included = False
+
+        if ProductSearchMethod.KEYWORD_NAME_CONTENT in config.search_methods and query_text.strip():
+            lucene_query_str = construct_lucene_query(query_text)
+            if lucene_query_str:
+                params["keyword_query_string_product"] = lucene_query_str
+                params["keyword_limit_param_product"] = config.keyword_fetch_limit
+                params["index_name_keyword_product"] = "product_name_content_ft" # Uses new index
+                cypher_parts.append(cypher_queries.PRODUCT_SEARCH_KEYWORD_PART)
+                keyword_part_included = True
+            else:
+                logger.debug("_fetch_products_combined: Keyword part skipped due to empty Lucene query.")
+
+        if ProductSearchMethod.SEMANTIC_NAME in config.search_methods and query_embedding:
+            params["semantic_embedding_product_name"] = query_embedding
+            params["semantic_limit_product_name"] = config.semantic_name_fetch_limit
+            params["semantic_min_score_product_name"] = config.min_similarity_score_name
+            params["index_name_semantic_product_name"] = "product_name_embedding_vector"
+            cypher_parts.append(cypher_queries.PRODUCT_SEARCH_SEMANTIC_NAME_PART)
+            semantic_name_part_included = True
+        else:
+            logger.debug("_fetch_products_combined: Semantic Name part skipped.")
+
+        if ProductSearchMethod.SEMANTIC_CONTENT in config.search_methods and query_embedding:
+            params["semantic_embedding_product_content"] = query_embedding
+            params["semantic_limit_product_content"] = config.semantic_content_fetch_limit
+            params["semantic_min_score_product_content"] = config.min_similarity_score_content
+            params["index_name_semantic_product_content"] = "product_content_embedding_vector" # Uses new index
+            cypher_parts.append(cypher_queries.PRODUCT_SEARCH_SEMANTIC_CONTENT_PART)
+            semantic_content_part_included = True
+        else:
+            logger.debug("_fetch_products_combined: Semantic Content part skipped.")
+            
+        if not cypher_parts:
+            logger.info("_fetch_products_combined: No search parts to execute.")
+            return []
+
+        final_query = " UNION ALL ".join(cypher_parts)
+        try:
+            param_keys_for_log = {k: (type(v).__name__ if not isinstance(v, list) else f"list_len_{len(v)}") for k,v in params.items()}
+            logger.debug(f"_fetch_products_combined: Executing with {len(cypher_parts)} part(s) (K: {keyword_part_included}, SN: {semantic_name_part_included}, SC: {semantic_content_part_included}). Query:\n{final_query}\nParams: {param_keys_for_log}")
+            fetch_start_time = time.perf_counter()
+            results, summary, _ = await self.driver.execute_query(final_query, params, database_=self.database)
+            fetch_duration = (time.perf_counter() - fetch_start_time) * 1000
+            num_rows_returned = len(results)
+            logger.debug(f"_fetch_products_combined: DB query took {fetch_duration:.2f} ms. Rows returned: {num_rows_returned}")
+            return [dict(record) for record in results]
+        except Exception as e:
+            logger.error(f"Error during _fetch_products_combined: {e}", exc_info=True); return []
+            
+    async def search_products(self, query_text: str, config: ProductSearchConfig, query_embedding: Optional[List[float]] = None) -> List[SearchResultItem]:
+        start_time = time.perf_counter()
+        logger.info(f"Searching products for: '{query_text}'")
+        
+        combined_method_results: List[Dict[str, Any]] = await self._fetch_products_combined(
+            query_text, config, query_embedding
+        )
+
+        if not combined_method_results:
+            logger.info("No results from combined fetch for products.")
+            duration_empty = (time.perf_counter() - start_time) * 1000
+            logger.info(f"Product search (empty results) completed in {duration_empty:.2f} ms.")
+            return []
+
+        all_method_results_for_rrf: List[List[Dict[str, Any]]] = []
+        if config.reranker == ProductRerankerMethod.RRF:
+            grouped_by_method: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            for res in combined_method_results:
+                grouped_by_method[res.get("method_source", "unknown")].append(res)
+            all_method_results_for_rrf = list(grouped_by_method.values())
+
+        final_items: List[SearchResultItem]
+        if config.reranker == ProductRerankerMethod.RRF and all_method_results_for_rrf:
+            final_items = self._apply_rrf(all_method_results_for_rrf, config.rrf_k, config.limit, "Product")
+        elif combined_method_results:
+            logger.debug("Applying simple sort for products as RRF is not configured or results could not be split.")
+            combined_method_results.sort(key=lambda x: x.get('score', 0.0), reverse=True)
+            # Logic to construct SearchResultItem for Product
+            final_items = []
+            for data in combined_method_results[:config.limit]:
+                item_metadata = {"method_source": data.get("method_source", "unknown")}
+                if data.get("sku") is not None:
+                    item_metadata["sku"] = data.get("sku")
+                if data.get("price") is not None:
+                    item_metadata["price"] = data.get("price")
+                
+                final_items.append(SearchResultItem(
+                    uuid=data["uuid"], 
+                    name=data.get("name"), 
+                    content=data.get("content"), # This is the JSON string for products
+                    score=data.get("score", 0.0), 
+                    result_type="Product",
+                    metadata=item_metadata
+                ))
+        else:
+            final_items = []
+        
+        duration = (time.perf_counter() - start_time) * 1000
+        logger.info(f"Product search completed in {duration:.2f} ms, found {len(final_items)} items.")
+        return final_items
+    
