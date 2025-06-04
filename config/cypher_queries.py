@@ -249,7 +249,7 @@ RETURN product.uuid AS product_uuid, product.name AS product_name
 LINK_PRODUCT_TO_SOURCE = """
 MATCH (product:Product {uuid: $product_uuid_param})
 MATCH (source:Source {uuid: $source_node_uuid_param})
-MERGE (product)-[r:DEFINED_IN_SOURCE]->(source)
+MERGE (product)-[r:BELONGS_TO_SOURCE]->(source) // Changed from DEFINED_IN_SOURCE
 ON CREATE SET r.created_at = $created_at_ts_param
 RETURN type(r) AS relationship_type
 """
@@ -277,27 +277,52 @@ RETURN type(r) AS relationship_type
 
 # --- Node Lifecycle / Promotion Queries ---
 PROMOTE_ENTITY_TO_PRODUCT = """
-MATCH (old_entity:Entity {uuid: $existing_entity_uuid_param}) // Re-introduce MATCH
+MATCH (old_entity:Entity {uuid: $existing_entity_uuid_param})
 
 // 1. Create the new Product node
 CREATE (new_product:Product {uuid: $new_product_uuid_param})
-SET new_product.name = $new_product_name_param, 
-    new_product.description = $new_product_description_param, 
-    new_product.created_at = $created_at_ts_param, 
+SET new_product.name = $new_product_name_param,
+    new_product.description = $new_product_description_param,
+    new_product.created_at = $created_at_ts_param,
     new_product.updated_at = $created_at_ts_param,
     new_product.processed_at = null
-SET new_product += $new_product_properties_param // Add dynamic properties
+SET new_product += $new_product_properties_param
 
-// Carry forward new_product's UUID explicitly before deleting old_entity
-WITH old_entity, new_product, new_product.uuid AS final_new_product_uuid
+// 2. Copy INCOMING relationships
+WITH old_entity, new_product
+OPTIONAL MATCH (source_node)-[old_rel_in]->(old_entity)
+WITH old_entity, new_product, source_node, old_rel_in, type(old_rel_in) AS rel_in_type, properties(old_rel_in) AS rel_in_props
+// Only proceed if old_rel_in exists (source_node will also exist)
+CALL apoc.do.when(old_rel_in IS NOT NULL,
+    'CALL apoc.create.relationship(s, rel_type_dyn, props_dyn, np) YIELD rel RETURN rel',
+    'RETURN null AS rel',
+    {s: source_node, np: new_product, rel_type_dyn: rel_in_type, props_dyn: rel_in_props}
+) YIELD value AS in_rel_creation_result
+// Aggregate count of newly created incoming relationships
+WITH old_entity, new_product, count(in_rel_creation_result.rel) AS copied_incoming_rels_count
 
-// 2. Detach and Delete the old Entity node
+// 3. Copy OUTGOING relationships
+WITH old_entity, new_product, copied_incoming_rels_count
+OPTIONAL MATCH (old_entity)-[old_rel_out]->(target_node)
+WITH old_entity, new_product, copied_incoming_rels_count, target_node, old_rel_out, type(old_rel_out) AS rel_out_type, properties(old_rel_out) AS rel_out_props
+// Only proceed if old_rel_out exists (target_node will also exist)
+CALL apoc.do.when(old_rel_out IS NOT NULL,
+    'CALL apoc.create.relationship(np, rel_type_dyn, props_dyn, t) YIELD rel RETURN rel',
+    'RETURN null AS rel',
+    {np: new_product, t: target_node, rel_type_dyn: rel_out_type, props_dyn: rel_out_props}
+) YIELD value AS out_rel_creation_result
+// Aggregate count of newly created outgoing relationships
+WITH old_entity, new_product, copied_incoming_rels_count, count(out_rel_creation_result.rel) AS copied_outgoing_rels_count
+
+// 4. Detach and Delete the old Entity node
+// new_product is carried through, old_entity is still in scope for deletion
+WITH new_product, copied_incoming_rels_count, copied_outgoing_rels_count, old_entity
 DETACH DELETE old_entity
 
-// 3. Return the captured UUID of the new product
-RETURN final_new_product_uuid AS new_product_uuid,
-       0 AS incoming_rels_copied, // Still placeholders
-       0 AS outgoing_rels_copied  // Still placeholders
+// 5. Return the new product's UUID and counts
+RETURN new_product.uuid AS new_product_uuid,
+       copied_incoming_rels_count AS incoming_rels_copied,
+       copied_outgoing_rels_count AS outgoing_rels_copied
 """
 
 LINK_CHUNK_TO_PRODUCT = """

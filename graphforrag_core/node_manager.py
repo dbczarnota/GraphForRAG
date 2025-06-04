@@ -260,7 +260,7 @@ class NodeManager:
         source_node_uuid: str,
         created_at: datetime
     ) -> bool:
-        """Links a Product node to its Source node using DEFINED_IN_SOURCE."""
+        """Links a Product node to its Source node using BELONGS_TO_SOURCE."""
         params = {
             "product_uuid_param": product_uuid,
             "source_node_uuid_param": source_node_uuid,
@@ -272,7 +272,8 @@ class NodeManager:
                 params, 
                 database_=self.database
             )
-            return bool(results and results[0]["relationship_type"] == "DEFINED_IN_SOURCE")
+            # Expect BELONGS_TO_SOURCE now
+            return bool(results and results[0]["relationship_type"] == "BELONGS_TO_SOURCE")
         except Exception as e:
             logger.error(f"NodeManager: Error linking product '{product_uuid}' to source '{source_node_uuid}': {e}", exc_info=True)
             return False

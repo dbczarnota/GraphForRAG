@@ -38,56 +38,10 @@ logging.basicConfig(
 logger = logging.getLogger("graph_for_rag_scenario_1_minimal") 
 traceback.install()
 
-# --- Minimal Data Setup ---
-
-# Text chunk that mentions "Dell XPS 13"
-# Taken from "Navigating the World of Personal Computers: 2024 Edition"
-TEXT_CHUNK_FOR_ENTITY_CREATION = {
-    "page_content": "Laptops masterfully blend portability with impressive performance, catering to a vast audience. Ultrabooks like the Dell XPS 13 (2024 model) and Apple's MacBook Air with the M3 chip are celebrated for their sleek designs, lightweight construction, and extended battery life, making them ideal for students, writers, and mobile professionals.",
-    "metadata": {
-        "name": "Minimal Guide - Laptops Excerpt", 
-        "chunk_number": 1, 
-        "keywords": ["laptops", "ultrabooks", "Dell XPS 13", "MacBook Air M3"]
-    }
-}
-
-MINIMAL_TEXT_SOURCE = {
-    "identifier": "Minimal_PC_Guide_Excerpt_Source",
-    "source_content": "A minimal excerpt from a PC guide focusing on laptops.",
-    "source_metadata": {"author": "Test Data Generator", "category": "Minimal Test Data"},
-    "chunks": [TEXT_CHUNK_FOR_ENTITY_CREATION]
-}
-
-# Product definition for "Dell XPS 13"
-# Taken from "Q3 2024 Tech Product Showcase"
-PRODUCT_DEFINITION_DELL_XPS_13 = {
-    "node_type": "product",
-    "content_type": "json",
-    "page_content": json.dumps({ 
-        "productName": "Dell XPS 13 (2024 Model 9340)", 
-        "brand": "Dell", "category": "Ultrabook Laptop", "sku": "DEL-XPS13-9340-I716512",
-        "release_year": 2024, "price_usd": 1299.00,
-        "features": ["Intel Core Ultra 7 processor", "13.4-inch InfinityEdge display"], 
-        "description": "The Dell XPS 13 (2024) continues its legacy of premium design and performance...",
-        "specifications": { "processor": "Intel Core Ultra 7 155H", "memory_gb_lpddr5x": "16GB" } 
-    }),
-    "metadata": { 
-        "name": "Dell XPS 13 (2024) - Minimal Product Def", 
-        "description": "Minimal product definition for Dell XPS 13.", 
-        "brand_category": "Dell Laptop", "target_audience": "Professionals"
-    }
-}
-
-MINIMAL_PRODUCT_SOURCE = {
-    "identifier": "Minimal_Product_Showcase_Dell_XPS_13_Source",
-    "source_content": "A minimal product definition for Dell XPS 13.",
-    "source_metadata": {"catalog_version": "minimal.1.0", "prepared_by": "Test Data Generator"},
-    "chunks": [PRODUCT_DEFINITION_DELL_XPS_13]
-}
 
 
 async def main():
-    logger.info("[bold cyan]Scenario 1 (Minimal Data): Promote Entity to Product - Test Started[/bold cyan]")
+    logger.info("[bold cyan]Scenario 1: Promote Entity & General Ingestion Test - Started[/bold cyan]") # Updated log message
     main_start_time = time.perf_counter() 
 
     load_dotenv()
@@ -112,30 +66,30 @@ async def main():
         await graph.ensure_indices()
         logger.info("Data cleared and schema ensured.")
 
-        # --- Part 1: Ingest Minimal Text Data to create "Dell XPS 13" as an Entity ---
-        logger.info("\n--- Ingesting Minimal Text Data ---")
-        await graph.add_documents_from_source(
-            source_identifier=MINIMAL_TEXT_SOURCE["identifier"],
-            documents_data=MINIMAL_TEXT_SOURCE["chunks"],
-            source_content=MINIMAL_TEXT_SOURCE.get("source_content"),
-            source_dynamic_metadata=MINIMAL_TEXT_SOURCE["source_metadata"]
-        )
-        logger.info(f"Finished ingesting '{MINIMAL_TEXT_SOURCE['identifier']}'.")
-        logger.info("Verify in Neo4j: An :Entity node for 'Dell XPS 13 (2024 model)' (or similar) should exist.")
-        # You can add an input("Press Enter...") here if you want to pause and check Neo4j manually
-        # input("Press Enter to continue to Product Ingestion phase...")
+        # --- Ingest data from all_source_data_sets (excluding Winnie-the-Pooh) ---
+        logger.info("\n--- Ingesting Data from source_data.py ---")
+        ingestion_count = 0
+        for source_set in all_source_data_sets:
+            source_identifier = source_set["identifier"]
+            if "Winnie-the-Pooh" in source_identifier:
+                logger.info(f"Skipping Winnie-the-Pooh data source: '{source_identifier}'")
+                continue
 
-
-        # --- Part 2: Ingest Minimal Product Definition for "Dell XPS 13" ---
-        logger.info("\n--- Ingesting Minimal Product Data (Dell XPS 13) ---")
-        await graph.add_documents_from_source(
-            source_identifier=MINIMAL_PRODUCT_SOURCE["identifier"],
-            documents_data=MINIMAL_PRODUCT_SOURCE["chunks"],
-            source_content=MINIMAL_PRODUCT_SOURCE.get("source_content"),
-            source_dynamic_metadata=MINIMAL_PRODUCT_SOURCE["source_metadata"]
-        )
-        logger.info("Finished ingesting Dell XPS 13 minimal product definition.")
-        logger.info("Verify in Neo4j: The :Entity for 'Dell XPS 13' should be GONE, and a :Product node should exist, with relationships transferred (if any existed).")
+            logger.info(f"Ingesting data source: '{source_identifier}'")
+            await graph.add_documents_from_source(
+                source_identifier=source_identifier,
+                documents_data=source_set["chunks"], # Ensure 'chunks' key exists and matches source_data.py
+                source_content=source_set.get("source_content"),
+                source_dynamic_metadata=source_set["source_metadata"]
+            )
+            logger.info(f"Finished ingesting '{source_identifier}'.")
+            ingestion_count += 1
+        
+        if ingestion_count == 0:
+            logger.warning("No data sets (other than Pooh) were found or ingested. Check source_data.py.")
+        else:
+            logger.info(f"All {ingestion_count} selected data sets processed.")
+            logger.info("Verify in Neo4j: Entities and Products should be created/promoted as expected based on the ingested data.")
         
         # Log final usage
         gen_usage = graph.get_total_generative_llm_usage()
@@ -148,7 +102,8 @@ async def main():
     finally:
         if graph:
             await graph.close()
-        logger.info(f"Scenario 1 (Minimal Data) finished in {(time.perf_counter() - main_start_time):.2f} seconds.")
-
+        logger.info(f"Scenario 1 (Promote Entity & General Ingestion Test) finished in {(time.perf_counter() - main_start_time):.2f} seconds.")
+        
+        
 if __name__ == "__main__":
     asyncio.run(main())
