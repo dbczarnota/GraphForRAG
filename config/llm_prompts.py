@@ -1,6 +1,6 @@
 # config/llm_prompts.py
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any # Added Dict
+from typing import List, Optional, Dict, Any, Literal # Added Dict
 
 # --- Pydantic Models for LLM Output (Entity Extraction) ---
 class ExtractedEntity(BaseModel):
@@ -50,7 +50,22 @@ class AlternativeQueriesList(BaseModel):
         description="A list of alternative queries generated to help retrieve relevant data. Should not include the original query."
     )
     
+# --- Pydantic Models for LLM Output (Entity Deduplication) ---
+
+class ExistingEntityCandidate(BaseModel):
+    uuid: str
+    name: str
+    label: str 
+    description: Optional[str] = None
+    node_type: Literal["Entity", "Product"] 
+    score: Optional[float] = None # ENSURE THIS FIELD EXISTS
     
+# --- Pydantic Models for LLM Output (Product-Entity Matching for Promotion) ---
+class ProductEntityMatchDecision(BaseModel):
+    is_strong_match: bool = Field(..., description="True if the new product data is considered a strong match for an existing Entity, indicating a promotion/replacement is suitable.")
+    matched_entity_uuid: Optional[str] = Field(default=None, description="The UUID of the existing Entity that the new product data matches. Null if not a strong match.")
+    
+            
 # --- Prompt Templates for Entity Extraction ---
 ENTITY_EXTRACTION_SYSTEM_PROMPT = """
 You are an expert AI assistant tasked with identifying and extracting named entities from the provided text.
@@ -89,28 +104,32 @@ The canonical_description should be concise, informative, and non-redundant, bas
 
 ENTITY_DEDUPLICATION_USER_PROMPT_TEMPLATE = """
 A "New Entity" has been extracted from a text. We have also found some "Existing Entity Candidates" from our knowledge graph that might be the same as the New Entity based on semantic similarity of their names.
+These candidates can be either:
+- 'Entity': A general concept, person, organization, etc., previously mentioned.
+- 'Product': A canonical product definition from a catalog or specific product data.
 
-New Entity Details:
+New Entity Details (extracted from current text):
 - Name: {new_entity_name}
 - Label: {new_entity_label}
 - Description (from current text): {new_entity_description}
 
 Existing Entity Candidates (if any):
 {existing_candidates_json_string} 
-{{!-- Each candidate in the JSON string above has 'uuid', 'name', 'label', and 'description' (if available) --}}
+{{!-- Each candidate in the JSON string above has 'uuid', 'name', 'label' (specific type like 'Person' or 'Laptop'), 'node_type' ('Entity' or 'Product'), and 'description' (if available) --}}
 
-Based on all the information provided:
+Task:
 1.  Determine if the "New Entity" refers to the exact same real-world thing as one of the "Existing Entity Candidates".
+    - If the New Entity seems to be a product and a matching "Product" candidate exists, prefer matching to the "Product" candidate.
     - Set `is_duplicate` to true if it is a duplicate, otherwise false.
     - If it is a duplicate, set `duplicate_of_uuid` to the UUID of the existing candidate it matches. If not a duplicate, set `duplicate_of_uuid` to null.
 
-2.  Determine the best `canonical_name` for this entity. This should be the most representative and complete name.
+2.  Determine the best `canonical_name` for this entity. This should be the most representative and complete name. If matching a "Product" candidate, the Product's name is usually canonical.
 
 3.  Create a `canonical_description`:
-    - If `is_duplicate` is true and a matching `existing_candidate` has a description, synthesize the `new_entity_description` with the `existing_candidate.description`. The goal is a single, coherent, non-redundant description that captures key information from both. If one description is clearly superior or more comprehensive, it can be favored.
+    - If `is_duplicate` is true and a matching `existing_candidate` (either Entity or Product) has a description, synthesize the `new_entity_description` with the `existing_candidate.description`. The goal is a single, coherent, non-redundant description. If one description is clearly superior or more comprehensive (e.g., a Product's official description vs. a brief textual mention), it can be favored.
     - If `is_duplicate` is true but the matched `existing_candidate` has no description, the `canonical_description` should be based on the `new_entity_description`.
     - If `is_duplicate` is false, the `canonical_description` should be based on the `new_entity_description`.
-    - The description should be concise and informative, ideally under 50 words. If the provided descriptions are vague or uninformative, the canonical_description can be null or a very brief summary. Base this *only* on the provided descriptions.
+    - The description should be concise and informative. Base this *only* on the provided descriptions.
 
 Provide your decision as a JSON object matching the EntityDeduplicationDecision schema.
 """
@@ -183,4 +202,35 @@ Current date (for context, if relevant to the query): {current_date}
 Current day of the week (for context, if relevant, e.g., for "tomorrow", "yesterday"): {current_day_of_a_week}
 
 Generate the alternative queries.
+"""
+
+# --- Prompt Templates for Product-Entity Matching (Promotion) ---
+PRODUCT_ENTITY_MATCH_SYSTEM_PROMPT = """
+You are an expert AI assistant specializing in entity matching and disambiguation.
+Your task is to determine if "New Product Data" (which will be used to create a canonical Product node)
+is a strong match for an "Existing Entity Candidate" that was previously extracted from general text.
+A strong match means they refer to the exact same real-world product, and the existing Entity should be replaced/upgraded by the new Product data.
+"""
+
+PRODUCT_ENTITY_MATCH_USER_PROMPT_TEMPLATE = """
+We are about to ingest "New Product Data" which will create a formal Product node in our knowledge graph.
+We found an "Existing Entity Candidate" (type :Entity) that might represent the same product, but was extracted from general text and might be less complete.
+
+New Product Data (summary):
+- Name: {new_product_name}
+- Description (if available): {new_product_description}
+- Key Attributes (if available from product data): {new_product_attributes_json_string}
+
+Existing Entity Candidate (extracted from text):
+- UUID: {existing_entity_uuid}
+- Name: {existing_entity_name}
+- Label: {existing_entity_label}
+- Description (from text): {existing_entity_description}
+
+Based on all the information provided, determine if the "New Product Data" is a **strong and unambiguous match** for the "Existing Entity Candidate".
+This means you are highly confident they refer to the exact same specific product.
+- If it's a strong match, set `is_strong_match` to true, and `matched_entity_uuid` to the UUID of the Existing Entity Candidate.
+- If it's not a strong match (e.g., different products, related but not identical, or insufficient information for high confidence), set `is_strong_match` to false.
+
+Provide your decision as a JSON object matching the ProductEntityMatchDecision schema.
 """

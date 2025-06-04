@@ -121,7 +121,7 @@ RETURN entity.uuid AS entity_uuid,
 LINK_CHUNK_TO_ENTITY = """
 MATCH (chunk:Chunk {uuid: $chunk_uuid_param})
 MATCH (entity:Entity {uuid: $entity_uuid_param})
-MERGE (chunk)-[r:MENTIONS_ENTITY]->(entity)
+MERGE (chunk)-[r:MENTIONS]->(entity) # CHANGED from MENTIONS_ENTITY
 ON CREATE SET r.created_at = $created_at_ts_param
 RETURN type(r) AS relationship_type
 """
@@ -152,6 +152,61 @@ RETURN
 ORDER BY score DESC
 """
 
+# (Can be placed near FIND_SIMILAR_ENTITIES_BY_VECTOR)
+FIND_SIMILAR_PRODUCTS_BY_VECTOR = """
+CALL db.index.vector.queryNodes($index_name_param, $top_k_param, $embedding_vector_param)
+YIELD node, score
+WHERE node:Product AND score >= $min_similarity_score_param  // Target Product nodes
+RETURN 
+    node.uuid AS uuid, 
+    node.name AS name, 
+    // For 'label', we can use a specific property like 'category' if Product nodes have it,
+    // or default to the string 'Product'. Let's use category if available, else 'Product'.
+    // This requires Product nodes to have a 'category' property for best results,
+    // or the client needs to handle a generic 'Product' label.
+    // For now, to keep it simple and align with Entity's 'label', we'll use 'Product' as the label here.
+    // Or, we can make it more dynamic:
+    // CASE WHEN node.category IS NOT NULL THEN node.category ELSE 'Product' END AS label,
+    // For now, let's just use the node label from Product itself, or a fixed string 'Product'.
+    // SchemaManager should ensure Products have a 'label' property, even if it's just "Product".
+    // Let's assume Product nodes might have a 'category' property that can serve as a label, or we use 'Product'.
+    // For consistency with ExistingEntityCandidate, we need a 'label'.
+    // Let's assume Product nodes store their primary category in a property like 'category'.
+    // If not, we'll default to "Product".
+    // The MERGE_PRODUCT_NODE query doesn't explicitly set a 'category' or 'label' property.
+    // We should ensure Product nodes have a 'label' property, similar to Entity nodes.
+    // For now, let's assume 'Product' as a fixed label for candidate type identification.
+    // The actual display label can come from node.name or node.category.
+    // The `ExistingEntityCandidate.label` field is for the candidate's own label.
+    // Let's use `node.category` if it exists, otherwise 'Product'.
+    // The `ExistingEntityCandidate.node_type` will be 'Product'.
+    // The `ExistingEntityCandidate.label` should reflect the Product's category or main type.
+    // The `MERGE_PRODUCT_NODE` should ideally set a `category` or `product_type` property from source data.
+    // For now, let's output a generic 'Product' label for Product candidates if 'category' isn't consistently there.
+    // To simplify, let's have MERGE_PRODUCT_NODE set a 'label' property for products, e.g., from their 'category' field.
+    // For this query, we will assume Product nodes have a 'category' field we can use, or we default.
+    // For candidate matching, the display name is node.name. The label is for filtering/info.
+    // Let's assume the Product nodes have a 'category' field that can be used as their 'label'.
+    // If not, we'll need to adjust. For now, using node.category.
+    // If Product.category is not guaranteed, we can use a fixed string "Product"
+    // Or, even better, if Product nodes are expected to have a 'label' property (like 'Laptop', 'Smartphone')
+    // similar to Entity nodes. Let's assume 'label' will be set on Product nodes too.
+    // The MERGE_PRODUCT_NODE should be updated to set product.label if not already.
+    // For now, we will rely on a property like 'category' or use a fixed 'Product' string.
+    // To keep it simple for this step, let's assume products store their type in 'category'.
+    // We need to make sure Product nodes have a `label` like property.
+    // Let's assume `node.category` or a fixed value.
+    // The `ExistingEntityCandidate.label` is for the specific type of product/entity.
+    // The `ExistingEntityCandidate.node_type` is "Product" or "Entity".
+    // So, for a Product, its label would be "Laptop", "Smartphone", etc.
+    // The current MERGE_PRODUCT_NODE doesn't set a generic 'label' property.
+    // Let's assume we add a 'category' property to products from JSON.
+    node.category AS label, // Using 'category' as the display label for the product
+    node.description AS description, 
+    score
+ORDER BY score DESC
+"""
+
 MERGE_RELATIONSHIP = """
 MATCH (source:Entity {uuid: $source_entity_uuid_param})
 MATCH (target:Entity {uuid: $target_entity_uuid_param})
@@ -172,6 +227,85 @@ SET_RELATIONSHIP_FACT_EMBEDDING = """
 MATCH ()-[r:RELATES_TO {uuid: $relationship_uuid_param}]->()
 CALL db.create.setRelationshipVectorProperty(r, 'fact_embedding', $embedding_vector_param)
 RETURN $relationship_uuid_param AS uuid_processed
+"""
+
+# --- Product Node Specific Queries ---
+MERGE_PRODUCT_NODE = """
+MERGE (product:Product {uuid: $product_uuid_param})
+ON CREATE SET
+    product.name = $name_param,
+    product.description = $description_param,
+    product.created_at = $created_at_ts_param,
+    product.processed_at = null, // Can be updated later if specific processing happens
+    product.updated_at = $created_at_ts_param
+ON MATCH SET
+    product.name = $name_param, // Allow updates to name/description on match
+    product.description = $description_param,
+    product.updated_at = $created_at_ts_param
+SET product += $dynamic_product_properties_param // For other attributes from source JSON
+RETURN product.uuid AS product_uuid, product.name AS product_name
+"""
+
+LINK_PRODUCT_TO_SOURCE = """
+MATCH (product:Product {uuid: $product_uuid_param})
+MATCH (source:Source {uuid: $source_node_uuid_param})
+MERGE (product)-[r:DEFINED_IN_SOURCE]->(source)
+ON CREATE SET r.created_at = $created_at_ts_param
+RETURN type(r) AS relationship_type
+"""
+
+SET_PRODUCT_NAME_EMBEDDING = """
+MATCH (p:Product {uuid: $product_uuid_param})
+CALL db.create.setNodeVectorProperty(p, 'name_embedding', $embedding_vector_param)
+RETURN $product_uuid_param AS uuid_processed
+"""
+
+SET_PRODUCT_DESCRIPTION_EMBEDDING = """
+MATCH (p:Product {uuid: $product_uuid_param})
+CALL db.create.setNodeVectorProperty(p, 'description_embedding', $embedding_vector_param)
+RETURN $product_uuid_param AS uuid_processed
+"""
+
+# This relationship will be used in Phase 2
+LINK_CHUNK_TO_ENTITY = """
+MATCH (chunk:Chunk {uuid: $chunk_uuid_param})
+MATCH (entity:Entity {uuid: $entity_uuid_param})
+MERGE (chunk)-[r:MENTIONS]->(entity) 
+ON CREATE SET r.created_at = $created_at_ts_param
+RETURN type(r) AS relationship_type
+"""
+
+# --- Node Lifecycle / Promotion Queries ---
+PROMOTE_ENTITY_TO_PRODUCT = """
+MATCH (old_entity:Entity {uuid: $existing_entity_uuid_param}) // Re-introduce MATCH
+
+// 1. Create the new Product node
+CREATE (new_product:Product {uuid: $new_product_uuid_param})
+SET new_product.name = $new_product_name_param, 
+    new_product.description = $new_product_description_param, 
+    new_product.created_at = $created_at_ts_param, 
+    new_product.updated_at = $created_at_ts_param,
+    new_product.processed_at = null
+SET new_product += $new_product_properties_param // Add dynamic properties
+
+// Carry forward new_product's UUID explicitly before deleting old_entity
+WITH old_entity, new_product, new_product.uuid AS final_new_product_uuid
+
+// 2. Detach and Delete the old Entity node
+DETACH DELETE old_entity
+
+// 3. Return the captured UUID of the new product
+RETURN final_new_product_uuid AS new_product_uuid,
+       0 AS incoming_rels_copied, // Still placeholders
+       0 AS outgoing_rels_copied  // Still placeholders
+"""
+
+LINK_CHUNK_TO_PRODUCT = """
+MATCH (chunk:Chunk {uuid: $chunk_uuid_param})
+MATCH (product:Product {uuid: $product_uuid_param})
+MERGE (chunk)-[r:MENTIONS]->(product) 
+ON CREATE SET r.created_at = $created_at_ts_param
+RETURN type(r) AS relationship_type
 """
 
 # --- Combined Search Query Parts ---
@@ -262,6 +396,7 @@ CREATE_CONSTRAINT_CHUNK_UUID = "CREATE CONSTRAINT chunk_uuid IF NOT EXISTS FOR (
 CREATE_CONSTRAINT_SOURCE_UUID = "CREATE CONSTRAINT source_uuid IF NOT EXISTS FOR (s:Source) REQUIRE s.uuid IS UNIQUE"
 CREATE_CONSTRAINT_SOURCE_NAME = "CREATE CONSTRAINT source_name IF NOT EXISTS FOR (s:Source) REQUIRE s.name IS UNIQUE"
 CREATE_CONSTRAINT_ENTITY_UUID = "CREATE CONSTRAINT entity_uuid IF NOT EXISTS FOR (e:Entity) REQUIRE e.uuid IS UNIQUE"
+CREATE_CONSTRAINT_PRODUCT_UUID = "CREATE CONSTRAINT product_uuid IF NOT EXISTS FOR (p:Product) REQUIRE p.uuid IS UNIQUE"
 
 CREATE_INDEX_CHUNK_NAME = "CREATE INDEX chunk_name IF NOT EXISTS FOR (c:Chunk) ON (c.name)"
 CREATE_INDEX_CHUNK_SOURCE_DESC_NUM = "CREATE INDEX chunk_source_desc_num IF NOT EXISTS FOR (c:Chunk) ON (c.source_description, c.chunk_number)"
@@ -270,6 +405,8 @@ CREATE_INDEX_ENTITY_NORMALIZED_NAME_LABEL = "CREATE INDEX entity_normalized_name
 CREATE_INDEX_ENTITY_NAME = "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)" 
 CREATE_INDEX_ENTITY_LABEL = "CREATE INDEX entity_label IF NOT EXISTS FOR (e:Entity) ON (e.label)"
 CREATE_INDEX_RELATIONSHIP_LABEL = "CREATE INDEX relationship_label_idx IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.relation_label)"
+CREATE_INDEX_PRODUCT_NAME = "CREATE INDEX product_name_idx IF NOT EXISTS FOR (p:Product) ON (p.name)"
+
 
 CREATE_FULLTEXT_CHUNK_CONTENT = "CREATE FULLTEXT INDEX chunk_content_ft IF NOT EXISTS FOR (c:Chunk) ON EACH [c.content, c.name]"
 CREATE_FULLTEXT_SOURCE_CONTENT = "CREATE FULLTEXT INDEX source_content_ft IF NOT EXISTS FOR (s:Source) ON EACH [s.content, s.name]"
@@ -278,6 +415,7 @@ CREATE_FULLTEXT_RELATIONSHIP_FACT = """
 CREATE FULLTEXT INDEX relationship_fact_ft IF NOT EXISTS 
 FOR ()-[r:RELATES_TO]-() ON EACH [r.relation_label, r.fact_sentence]
 """ 
+CREATE_FULLTEXT_PRODUCT_NAME_DESC = "CREATE FULLTEXT INDEX product_name_desc_ft IF NOT EXISTS FOR (p:Product) ON EACH [p.name, p.description]"
 
 CREATE_VECTOR_INDEX_TEMPLATE = """
 CREATE VECTOR INDEX $index_name IF NOT EXISTS
@@ -294,6 +432,10 @@ DROP_CONSTRAINT_CHUNK_UUID = "DROP CONSTRAINT chunk_uuid IF EXISTS"
 DROP_CONSTRAINT_SOURCE_UUID = "DROP CONSTRAINT source_uuid IF EXISTS"
 DROP_CONSTRAINT_SOURCE_NAME = "DROP CONSTRAINT source_name IF EXISTS"
 DROP_CONSTRAINT_ENTITY_UUID = "DROP CONSTRAINT entity_uuid IF EXISTS"
+DROP_CONSTRAINT_PRODUCT_UUID = "DROP CONSTRAINT product_uuid IF EXISTS"
+
+
+
 
 DROP_INDEX_CHUNK_NAME = "DROP INDEX chunk_name IF EXISTS"
 DROP_INDEX_CHUNK_SOURCE_DESC_NUM = "DROP INDEX chunk_source_desc_num IF EXISTS"
@@ -302,12 +444,13 @@ DROP_INDEX_ENTITY_NORMALIZED_NAME_LABEL = "DROP INDEX entity_normalized_name_lab
 DROP_INDEX_ENTITY_NAME = "DROP INDEX entity_name IF EXISTS"
 DROP_INDEX_ENTITY_LABEL = "DROP INDEX entity_label IF EXISTS"
 DROP_INDEX_RELATIONSHIP_LABEL = "DROP INDEX relationship_label_idx IF EXISTS"
+DROP_INDEX_PRODUCT_NAME = "DROP INDEX product_name_idx IF EXISTS"
 
 DROP_FULLTEXT_ENTITY_NAME_DESC = "DROP INDEX entity_name_desc_ft IF EXISTS"
 DROP_FULLTEXT_CHUNK_CONTENT = "DROP INDEX chunk_content_ft IF EXISTS" 
 DROP_FULLTEXT_SOURCE_CONTENT = "DROP INDEX source_content_ft IF EXISTS"
 DROP_FULLTEXT_RELATIONSHIP_FACT = "DROP INDEX relationship_fact_ft IF EXISTS"
-
+DROP_FULLTEXT_PRODUCT_NAME_DESC = "DROP INDEX product_name_desc_ft IF EXISTS"
 
 GET_DISTINCT_PROPERTY_KEYS_FOR_LABEL_FALLBACK_TEMPLATE = """
 MATCH (n:{node_label_placeholder}) 

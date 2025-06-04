@@ -7,8 +7,8 @@ from typing import Optional, Any, Dict, Tuple, List
 from neo4j import AsyncDriver # type: ignore
 
 from config import cypher_queries
-# Import EmbedderClient to use its type hint, though NodeManager itself won't use it directly here
 from .embedder_client import EmbedderClient 
+from .utils import preprocess_metadata_for_neo4j # ADDED IMPORT
 
 logger = logging.getLogger("graph_for_rag.node_manager")
 
@@ -222,3 +222,189 @@ class NodeManager:
         except Exception as e:
             logger.error(f"NodeManager: Error setting fact embedding for relationship '{relationship_uuid}': {e}", exc_info=True)
             return False
+        
+    async def create_or_merge_product_node(
+        self,
+        product_uuid: str,
+        name: str,
+        description: Optional[str],
+        created_at: datetime,
+        dynamic_product_properties: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
+        """Creates or merges a Product node."""
+        params = {
+            "product_uuid_param": product_uuid,
+            "name_param": name,
+            "description_param": description,
+            "created_at_ts_param": created_at,
+            "dynamic_product_properties_param": dynamic_product_properties or {}
+        }
+        try:
+            results, _, _ = await self.driver.execute_query( # type: ignore
+                cypher_queries.MERGE_PRODUCT_NODE, 
+                params, 
+                database_=self.database
+            )
+            if results and results[0]["product_uuid"]:
+                logger.debug(f"NodeManager: Product node '{name}' (UUID: {results[0]['product_uuid']}) merged/created.")
+                return results[0]["product_uuid"]
+            logger.warning(f"NodeManager: MERGE_PRODUCT_NODE for '{name}' did not return expected results.")
+            return None
+        except Exception as e:
+            logger.error(f"NodeManager: Error merging/creating product node '{name}': {e}", exc_info=True)
+            return None
+
+    async def link_product_to_source(
+        self,
+        product_uuid: str,
+        source_node_uuid: str,
+        created_at: datetime
+    ) -> bool:
+        """Links a Product node to its Source node using DEFINED_IN_SOURCE."""
+        params = {
+            "product_uuid_param": product_uuid,
+            "source_node_uuid_param": source_node_uuid,
+            "created_at_ts_param": created_at
+        }
+        try:
+            results, _, _ = await self.driver.execute_query( # type: ignore
+                cypher_queries.LINK_PRODUCT_TO_SOURCE, 
+                params, 
+                database_=self.database
+            )
+            return bool(results and results[0]["relationship_type"] == "DEFINED_IN_SOURCE")
+        except Exception as e:
+            logger.error(f"NodeManager: Error linking product '{product_uuid}' to source '{source_node_uuid}': {e}", exc_info=True)
+            return False
+
+    async def set_product_name_embedding(self, product_uuid: str, embedding_vector: List[float]) -> bool:
+        """Sets the name_embedding vector property for a given Product node."""
+        try:
+            params = {
+                "product_uuid_param": product_uuid,
+                "embedding_vector_param": embedding_vector
+            }
+            results, _, _ = await self.driver.execute_query( # type: ignore
+                cypher_queries.SET_PRODUCT_NAME_EMBEDDING,
+                params,
+                database_=self.database
+            )
+            return bool(results and results[0].get("uuid_processed") == product_uuid)
+        except Exception as e:
+            logger.error(f"NodeManager: Error setting product name embedding for '{product_uuid}': {e}", exc_info=True)
+            return False
+
+    async def set_product_description_embedding(self, product_uuid: str, embedding_vector: List[float]) -> bool:
+        """Sets the description_embedding vector property for a given Product node."""
+        try:
+            params = {
+                "product_uuid_param": product_uuid,
+                "embedding_vector_param": embedding_vector
+            }
+            results, _, _ = await self.driver.execute_query( # type: ignore
+                cypher_queries.SET_PRODUCT_DESCRIPTION_EMBEDDING,
+                params,
+                database_=self.database
+            )
+            return bool(results and results[0].get("uuid_processed") == product_uuid)
+        except Exception as e:
+            logger.error(f"NodeManager: Error setting product description embedding for '{product_uuid}': {e}", exc_info=True)
+            return False
+
+    async def link_chunk_to_product(self, chunk_uuid: str, product_uuid: str, created_at_ts: datetime) -> bool:
+        """Links a Chunk node to a Product node using MENTIONS_PRODUCT (for Phase 2)."""
+        params = {
+            "chunk_uuid_param": chunk_uuid,
+            "product_uuid_param": product_uuid,
+            "created_at_ts_param": created_at_ts
+        }
+        try:
+            results, _, _ = await self.driver.execute_query( # type: ignore
+                cypher_queries.LINK_CHUNK_TO_PRODUCT, 
+                params, 
+                database_=self.database
+            )
+            return bool(results and results[0]["relationship_type"] == "MENTIONS_PRODUCT")
+        except Exception as e:
+            logger.error(f"NodeManager: Error linking chunk '{chunk_uuid}' to product '{product_uuid}': {e}", exc_info=True)
+            return False
+
+    async def promote_entity_to_product(
+        self,
+        existing_entity_uuid: str,
+        new_product_uuid: str, 
+        new_product_name: str,
+        new_product_description: Optional[str],
+        new_product_dynamic_properties: Dict[str, Any],
+        promotion_timestamp: datetime
+    ) -> Optional[str]:
+        
+        processed_dynamic_props = preprocess_metadata_for_neo4j(new_product_dynamic_properties)
+        params = {
+            "existing_entity_uuid_param": existing_entity_uuid, # Still needed if the query refers to it
+            "new_product_uuid_param": new_product_uuid,
+            "new_product_name_param": new_product_name,
+            "new_product_description_param": new_product_description,
+            "new_product_properties_param": processed_dynamic_props, 
+            "created_at_ts_param": promotion_timestamp
+        }
+        try:
+            logger.info(f"NodeManager: Attempting to promote Entity '{existing_entity_uuid}' to Product '{new_product_name}' (new UUID: {new_product_uuid}).")
+            # Log all parameter values
+            logger.debug(f"NodeManager: Promotion FULL PARAMS being sent: {params}")
+
+
+            # Test Query 1: Check if old_entity exists (already present from previous step, good to keep)
+            test_query_1 = "MATCH (e:Entity {uuid: $existing_entity_uuid_param}) RETURN e.uuid AS uuid, e.name AS name LIMIT 1"
+            test_results_1, _, _ = await self.driver.execute_query(test_query_1, {"existing_entity_uuid_param": existing_entity_uuid}, database_=self.database) # type: ignore
+            if not test_results_1:
+                logger.error(f"NodeManager: PRE-CHECK FAILED - Old entity {existing_entity_uuid} not found before promotion attempt.")
+                return None 
+            else:
+                logger.info(f"NodeManager: PRE-CHECK PASSED - Old entity {existing_entity_uuid} (Name: {test_results_1[0].get('name')}) found.")
+
+            current_query_text = cypher_queries.PROMOTE_ENTITY_TO_PRODUCT # Get current query text
+            logger.debug(f"NodeManager: EXECUTING CYPHER for promotion:\n{current_query_text}\nWith PARAMS:\n{params}")
+
+
+            results, summary, _ = await self.driver.execute_query( # type: ignore
+                current_query_text, # Use the variable for clarity
+                params,
+                database_=self.database
+            )
+
+            if summary:
+                logger.debug(f"NodeManager: Promotion query summary: "
+                             f"nodes_created={summary.counters.nodes_created}, "
+                             f"nodes_deleted={summary.counters.nodes_deleted}, "
+                             f"rels_created={summary.counters.relationships_created}, "
+                             f"rels_deleted={summary.counters.relationships_deleted}, "
+                             f"props_set={summary.counters.properties_set}")
+            else:
+                logger.warning("NodeManager: Promotion query did not return a summary object.")
+
+
+            if results and results[0].get("new_product_uuid"):
+                new_puuid = results[0]["new_product_uuid"]
+                # With the ultra-simplified query, these counts will be 0
+                inc_copied = results[0].get("incoming_rels_copied", -1) # Default to -1 if key missing
+                out_copied = results[0].get("outgoing_rels_copied", -1)
+
+                logger.info(f"NodeManager: Successfully processed promotion for Entity '{existing_entity_uuid}'. New Product UUID: '{new_puuid}'. Rel stats (placeholders for this test): In={inc_copied}, Out={out_copied}.")
+                
+                # If using the ultra-simplified query, old entity is NOT deleted by it.
+                # We can add a separate delete call here for testing that part if needed,
+                # or rely on the next test run to clear it if it was left behind.
+                # For now, the simplified query doesn't delete.
+                
+                return new_puuid
+            else:
+                logger.error(f"NodeManager: Promotion of Entity '{existing_entity_uuid}' to Product failed to return new product UUID from results. Results list might be empty or record malformed.")
+                if results: 
+                    logger.error(f"NodeManager: Actual Result content from DB: {results[0]}")
+                else:
+                    logger.error("NodeManager: Results list from DB was empty.")
+                return None
+        except Exception as e:
+            logger.error(f"NodeManager: EXCEPTION during promotion of Entity '{existing_entity_uuid}' to Product: {e}", exc_info=True)
+            return None

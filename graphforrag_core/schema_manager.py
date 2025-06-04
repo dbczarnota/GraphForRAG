@@ -67,19 +67,23 @@ class SchemaManager:
             (cypher_queries.CREATE_CONSTRAINT_SOURCE_UUID, {}),
             (cypher_queries.CREATE_CONSTRAINT_SOURCE_NAME, {}),
             (cypher_queries.CREATE_CONSTRAINT_ENTITY_UUID, {}),
+            (cypher_queries.CREATE_CONSTRAINT_PRODUCT_UUID, {}), # ADDED for Product
             (cypher_queries.CREATE_INDEX_CHUNK_NAME, {}),
             (cypher_queries.CREATE_INDEX_CHUNK_SOURCE_DESC_NUM, {}),
             (cypher_queries.CREATE_INDEX_SOURCE_CONTENT, {}),
             (cypher_queries.CREATE_INDEX_ENTITY_NAME, {}), 
             (cypher_queries.CREATE_INDEX_ENTITY_LABEL, {}),
             (cypher_queries.CREATE_INDEX_ENTITY_NORMALIZED_NAME_LABEL, {}),
+            (cypher_queries.CREATE_INDEX_PRODUCT_NAME, {}), # ADDED for Product
             (cypher_queries.CREATE_FULLTEXT_CHUNK_CONTENT, {}),
-            (cypher_queries.CREATE_FULLTEXT_SOURCE_CONTENT, {}), # <-- ENSURED THIS IS PRESENT
+            (cypher_queries.CREATE_FULLTEXT_SOURCE_CONTENT, {}), 
             (cypher_queries.CREATE_FULLTEXT_ENTITY_NAME_DESC, {}),
+            (cypher_queries.CREATE_FULLTEXT_PRODUCT_NAME_DESC, {}), # ADDED for Product
             (cypher_queries.CREATE_INDEX_RELATIONSHIP_LABEL, {}),
             (cypher_queries.CREATE_FULLTEXT_RELATIONSHIP_FACT, {}),
         ]
 
+        # Vector index for Chunk content
         chunk_node_label = "Chunk"
         chunk_property_name = "content_embedding"
         chunk_vector_index_name = f"{chunk_node_label.lower()}_{chunk_property_name}_vector"
@@ -88,14 +92,16 @@ class SchemaManager:
         ).replace("$node_label", chunk_node_label).replace("$property_name", chunk_property_name).replace("$dimension", str(self.embedder.dimension)).replace("$similarity_function", "cosine")
         static_queries_and_params.append((create_vector_index_chunk_query, {}))
 
+        # Vector index for Source content
         source_node_label = "Source"
         source_property_name = "content_embedding"
-        source_vector_index_name = f"{source_node_label.lower()}_{source_property_name}_vector" # Corrected name
+        source_vector_index_name = f"{source_node_label.lower()}_{source_property_name}_vector" 
         create_vector_index_source_query = cypher_queries.CREATE_VECTOR_INDEX_TEMPLATE.replace(
             "$index_name", source_vector_index_name
         ).replace("$node_label", source_node_label).replace("$property_name", source_property_name).replace("$dimension", str(self.embedder.dimension)).replace("$similarity_function", "cosine")
-        static_queries_and_params.append((create_vector_index_source_query, {})) # <-- ENSURED THIS IS PRESENT AND CORRECT
+        static_queries_and_params.append((create_vector_index_source_query, {}))
 
+        # Vector indexes for Entity name and description
         entity_node_label = "Entity"
         entity_name_property = "name_embedding"
         entity_name_vector_index = f"{entity_node_label.lower()}_{entity_name_property}_vector"
@@ -111,6 +117,23 @@ class SchemaManager:
         ).replace("$node_label", entity_node_label).replace("$property_name", entity_desc_property).replace("$dimension", str(self.embedder.dimension)).replace("$similarity_function", "cosine")
         static_queries_and_params.append((create_vector_index_entity_desc_query, {}))
         
+        # Vector indexes for Product name and description (NEW)
+        product_node_label = "Product"
+        product_name_property = "name_embedding"
+        product_name_vector_index = f"{product_node_label.lower()}_{product_name_property}_vector"
+        create_vector_index_product_name_query = cypher_queries.CREATE_VECTOR_INDEX_TEMPLATE.replace(
+            "$index_name", product_name_vector_index
+        ).replace("$node_label", product_node_label).replace("$property_name", product_name_property).replace("$dimension", str(self.embedder.dimension)).replace("$similarity_function", "cosine")
+        static_queries_and_params.append((create_vector_index_product_name_query, {}))
+
+        product_desc_property = "description_embedding"
+        product_desc_vector_index = f"{product_node_label.lower()}_{product_desc_property}_vector"
+        create_vector_index_product_desc_query = cypher_queries.CREATE_VECTOR_INDEX_TEMPLATE.replace(
+            "$index_name", product_desc_vector_index
+        ).replace("$node_label", product_node_label).replace("$property_name", product_desc_property).replace("$dimension", str(self.embedder.dimension)).replace("$similarity_function", "cosine")
+        static_queries_and_params.append((create_vector_index_product_desc_query, {}))
+
+        # Vector index for Relationship fact
         rel_type_for_vector = "RELATES_TO"
         rel_property_name_for_vector = "fact_embedding"
         rel_vector_index_name = f"{rel_type_for_vector.lower()}_{rel_property_name_for_vector}_vector"
@@ -126,7 +149,7 @@ class SchemaManager:
         
         all_queries_to_run = list(static_queries_and_params)
 
-        for node_label in ["Chunk", "Source", "Entity"]:
+        for node_label in ["Chunk", "Source", "Entity", "Product"]: # ADDED "Product" to list for dynamic B-tree
             dynamic_props = await self._get_dynamic_properties_for_btree_indexing(node_label)
             for prop_key in dynamic_props:
                 safe_prop_key_for_name = re.sub(r'[^a-zA-Z0-9_]', '_', prop_key)
@@ -142,8 +165,7 @@ class SchemaManager:
                     logger.debug(f"Executing: {query_string.strip()} with params {params if params else ''}")
                     await session.run(query_string, params)
                 except Exception as e:
-                    logger.error(f"Failed to execute schema query '{query_string.strip()}': {e}", exc_info=True) # Enhanced logging
-                    # Add a specific check for this index if you want more granular logging on failure
+                    logger.error(f"Failed to execute schema query '{query_string.strip()}': {e}", exc_info=True) 
                     if "relationship_fact_ft" in query_string and "CREATE FULLTEXT INDEX" in query_string:
                         logger.error(f"Specifically failed to create full-text index 'relationship_fact_ft': {e}", exc_info=True)
                     
@@ -159,23 +181,26 @@ class SchemaManager:
             cypher_queries.DROP_INDEX_ENTITY_NAME, 
             cypher_queries.DROP_INDEX_ENTITY_LABEL,
             cypher_queries.DROP_INDEX_ENTITY_NORMALIZED_NAME_LABEL,
+            cypher_queries.DROP_INDEX_PRODUCT_NAME, # ADDED for Product
             cypher_queries.DROP_FULLTEXT_CHUNK_CONTENT, 
-            cypher_queries.DROP_FULLTEXT_SOURCE_CONTENT, # <-- ENSURED THIS IS PRESENT
+            cypher_queries.DROP_FULLTEXT_SOURCE_CONTENT, 
             cypher_queries.DROP_FULLTEXT_ENTITY_NAME_DESC,
+            cypher_queries.DROP_FULLTEXT_PRODUCT_NAME_DESC, # ADDED for Product
             cypher_queries.DROP_CONSTRAINT_CHUNK_UUID,
             cypher_queries.DROP_CONSTRAINT_SOURCE_UUID,
             cypher_queries.DROP_CONSTRAINT_SOURCE_NAME,
             cypher_queries.DROP_CONSTRAINT_ENTITY_UUID,
+            cypher_queries.DROP_CONSTRAINT_PRODUCT_UUID, # ADDED for Product
             cypher_queries.DROP_INDEX_RELATIONSHIP_LABEL,
-            # Relationship full-text index drop
-            "DROP INDEX relationship_fact_ft IF EXISTS", # <-- ADDED missing drop for relationship FT index
+            "DROP INDEX relationship_fact_ft IF EXISTS", 
         ]
         
+        # Vector index drops
         chunk_vector_index_name = "chunk_content_embedding_vector"
         queries_to_drop_str.append(f"DROP INDEX {chunk_vector_index_name} IF EXISTS")
         
-        source_vector_index_name = "source_content_embedding_vector" # Corrected name
-        queries_to_drop_str.append(f"DROP INDEX {source_vector_index_name} IF EXISTS") # <-- ENSURED THIS IS PRESENT AND CORRECT
+        source_vector_index_name = "source_content_embedding_vector" 
+        queries_to_drop_str.append(f"DROP INDEX {source_vector_index_name} IF EXISTS") 
         
         entity_name_vector_index = "entity_name_embedding_vector"
         queries_to_drop_str.append(f"DROP INDEX {entity_name_vector_index} IF EXISTS")
@@ -183,10 +208,17 @@ class SchemaManager:
         entity_desc_vector_index = "entity_description_embedding_vector"
         queries_to_drop_str.append(f"DROP INDEX {entity_desc_vector_index} IF EXISTS")
 
+        # Vector index drops for Product (NEW)
+        product_name_vector_index = "product_name_embedding_vector"
+        queries_to_drop_str.append(f"DROP INDEX {product_name_vector_index} IF EXISTS")
+        
+        product_desc_vector_index = "product_description_embedding_vector"
+        queries_to_drop_str.append(f"DROP INDEX {product_desc_vector_index} IF EXISTS")
+
         rel_vector_index_name = "relates_to_fact_embedding_vector"
         queries_to_drop_str.append(f"DROP INDEX {rel_vector_index_name} IF EXISTS")
 
-        for node_label in ["Chunk", "Source", "Entity"]:
+        for node_label in ["Chunk", "Source", "Entity", "Product"]: # ADDED "Product" to list for dynamic B-tree
             try:
                 dynamic_props = await self._get_dynamic_properties_for_btree_indexing(node_label)
                 for prop_key in dynamic_props:
