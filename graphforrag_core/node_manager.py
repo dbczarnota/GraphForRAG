@@ -445,3 +445,166 @@ class NodeManager:
         except Exception as e:
             logger.error(f"NodeManager: Error setting fact_embedding for MENTIONS between chunk '{chunk_uuid}' and target node '{target_node_uuid}': {e}", exc_info=True) # Updated log
             return False
+
+    async def delete_source_and_derived_data(self, source_uuid: str) -> Dict[str, int]:
+        logger.info(f"NodeManager: Initiating deletion for Source UUID: {source_uuid}")
+        deleted_counts = {
+            "sources": 0, "chunks": 0, "products": 0, "products_demoted": 0,
+            "mentions_rels": 0, "relates_to_rels": 0, "entities": 0,
+        }
+
+        async with self.driver.session(database=self.database) as session:
+            tx = await session.begin_transaction()
+            try:
+                # 1. Get Chunk and Product UUIDs belonging to this source
+                cursor = await tx.run(cypher_queries.GET_CHUNKS_FOR_SOURCE, source_uuid=source_uuid)
+                chunk_uuids_of_source = [r["node_uuid"] async for r in cursor]
+                await cursor.consume()
+                logger.debug(f"  Found {len(chunk_uuids_of_source)} chunks for source {source_uuid}.")
+
+                cursor = await tx.run(cypher_queries.GET_PRODUCTS_FOR_SOURCE, source_uuid=source_uuid)
+                product_uuids_of_source = [r["node_uuid"] async for r in cursor]
+                await cursor.consume()
+                logger.debug(f"  Found {len(product_uuids_of_source)} products for source {source_uuid}.")
+
+                all_origin_nodes_from_source = list(set(chunk_uuids_of_source + product_uuids_of_source))
+                if not all_origin_nodes_from_source: logger.info(f"  No chunks or products linked to source {source_uuid}.")
+                else: logger.debug(f"  Total origin nodes from source {source_uuid}: {len(all_origin_nodes_from_source)}")
+
+                # Pre-fetch potential orphans
+                potential_orphan_details = []
+                if all_origin_nodes_from_source:
+                    cursor = await tx.run(cypher_queries.GET_POTENTIAL_ORPHANS_CONNECTED_TO_ORIGINS, origin_uuids=all_origin_nodes_from_source)
+                    potential_orphan_details = [{"uuid": r["node_uuid"], "name": r["node_name"], "labels": r["node_labels"]} async for r in cursor]
+                    await cursor.consume()
+                    logger.debug(f"  Identified {len(potential_orphan_details)} potential orphan candidates.")
+
+                # 2. Delete RELATES_TO relationships from these origins
+                if all_origin_nodes_from_source:
+                    cursor = await tx.run(cypher_queries.DELETE_RELATES_TO_BY_SOURCE_CHUNK_UUIDS, origin_uuids=all_origin_nodes_from_source)
+                    rec = await cursor.single(); deleted_counts["relates_to_rels"] = rec["deleted_count"] if rec else 0; await cursor.consume()
+                    logger.info(f"  Deleted {deleted_counts['relates_to_rels']} RELATES_TO relationships from source origins.")
+
+                # 3. Delete MENTIONS relationships from these origins
+                if all_origin_nodes_from_source:
+                    cursor = await tx.run(cypher_queries.DELETE_MENTIONS_BY_ORIGIN_UUIDS, origin_uuids=all_origin_nodes_from_source)
+                    rec = await cursor.single(); deleted_counts["mentions_rels"] = rec["total_deleted"] if rec else 0; await cursor.consume()
+                    logger.info(f"  Deleted {deleted_counts['mentions_rels']} MENTIONS relationships from source origins.")
+
+                # 4. Identify and delete orphaned Entities
+                entities_to_fully_delete = []
+                if potential_orphan_details:
+                    for target_detail in potential_orphan_details:
+                        if "Entity" not in target_detail["labels"]: continue
+                        entity_uuid = target_detail["uuid"]
+                        
+                        cursor = await tx.run(cypher_queries.CHECK_ENTITY_MENTIONED_BY_OTHERS, entity_uuid=entity_uuid, deleted_origin_uuids=all_origin_nodes_from_source)
+                        rec = await cursor.single(); is_mentioned = rec["is_mentioned_by_others"] if rec else False; await cursor.consume()
+                        
+                        cursor = await tx.run(cypher_queries.CHECK_ENTITY_HAS_OTHER_RELATIONSHIPS, entity_uuid=entity_uuid, deleted_origin_uuids=all_origin_nodes_from_source)
+                        rec = await cursor.single(); has_other_rels = rec["has_other_relationships"] if rec else False; await cursor.consume()
+                        
+                        if not is_mentioned and not has_other_rels:
+                            entities_to_fully_delete.append(entity_uuid)
+                            logger.debug(f"    Entity '{target_detail['name']}' ({entity_uuid}) marked as orphan.")
+                        else:
+                            logger.debug(f"    Entity '{target_detail['name']}' ({entity_uuid}) kept. External mentions: {is_mentioned}, Other rels: {has_other_rels}.")
+                
+                if entities_to_fully_delete:
+                    cursor = await tx.run(cypher_queries.DELETE_ENTITIES_BY_UUIDS, entity_uuids=entities_to_fully_delete)
+                    rec = await cursor.single(); deleted_counts["entities"] = rec["deleted_count"] if rec else 0; await cursor.consume()
+                    logger.info(f"  Deleted {deleted_counts['entities']} orphaned Entities.")
+
+                # 5. Handle Products (Demotion or Deletion)
+                products_to_delete_fully = []
+                if product_uuids_of_source:
+                    for product_uuid in product_uuids_of_source:
+                        cursor = await tx.run(cypher_queries.GET_PRODUCT_DETAILS_FOR_DEMOTION, uuid=product_uuid)
+                        prod_rec = await cursor.single(); await cursor.consume()
+                        prod_name = prod_rec["name"] if prod_rec else "Unknown Product"
+                        prod_cat = prod_rec["category"] if prod_rec and prod_rec["category"] else "Product"
+
+                        cursor = await tx.run(cypher_queries.CHECK_PRODUCT_MENTIONED_EXTERNALLY, product_uuid=product_uuid, deleted_origin_uuids=all_origin_nodes_from_source)
+                        rec = await cursor.single(); mentioned_ext = rec["is_mentioned_externally"] if rec else False; await cursor.consume()
+                        
+                        cursor = await tx.run(cypher_queries.CHECK_PRODUCT_RELATED_EXTERNALLY_AS_TARGET, product_uuid=product_uuid, deleted_origin_uuids=all_origin_nodes_from_source)
+                        rec = await cursor.single(); related_ext = rec["is_related_to_as_target_externally"] if rec else False; await cursor.consume()
+
+                        if mentioned_ext or related_ext:
+                            logger.info(f"    Product '{prod_name}' ({product_uuid}) referenced externally. Demoting.")
+                            new_entity_uuid = str(uuid.uuid4())
+                            demotion_label = prod_cat if prod_cat.strip() else "DemotedProduct"
+                            await tx.run(cypher_queries.CREATE_DEMOTED_ENTITY_FROM_PRODUCT, new_uuid=new_entity_uuid, name=prod_name, label=demotion_label, original_uuid=product_uuid)
+                            deleted_counts["products_demoted"] += 1
+                            
+                            params_relink = {"original_product_uuid": product_uuid, "new_demoted_entity_uuid": new_entity_uuid, "deleted_origin_uuids": all_origin_nodes_from_source}
+                            cursor = await tx.run(cypher_queries.RELINK_MENTIONS_TO_DEMOTED_ENTITY, params_relink); rec = await cursor.single(); await cursor.consume()
+                            if rec and rec["relinked_count"] > 0: logger.debug(f"      Re-linked {rec['relinked_count']} MENTIONS to demoted {new_entity_uuid}.")
+                            
+                            cursor = await tx.run(cypher_queries.RELINK_INCOMING_RELATES_TO_TO_DEMOTED_ENTITY, params_relink); rec = await cursor.single(); await cursor.consume()
+                            if rec and rec["relinked_count"] > 0: logger.debug(f"      Re-linked {rec['relinked_count']} incoming RELATES_TO to demoted {new_entity_uuid}.")
+
+                            cursor = await tx.run(cypher_queries.RELINK_OUTGOING_RELATES_TO_FROM_DEMOTED_ENTITY, original_product_uuid=product_uuid, new_demoted_entity_uuid=new_entity_uuid); rec = await cursor.single(); await cursor.consume()
+                            if rec and rec["relinked_count"] > 0: logger.debug(f"      Re-linked {rec['relinked_count']} outgoing RELATES_TO from demoted {new_entity_uuid}.")
+                            
+                            cursor = await tx.run(cypher_queries.DELETE_PRODUCT_BY_UUID_DETACH, uuid=product_uuid); await cursor.consume() # Deletes original product
+                            logger.debug(f"      Original Product {product_uuid} deleted after demotion.")
+                        else:
+                            products_to_delete_fully.append(product_uuid)
+                            logger.info(f"    Product '{prod_name}' ({product_uuid}) not referenced externally. Marking for full deletion.")
+                
+                if products_to_delete_fully:
+                    cursor = await tx.run(cypher_queries.DELETE_PRODUCTS_BY_UUIDS_DETACH, product_uuids=products_to_delete_fully)
+                    rec = await cursor.single(); deleted_counts["products"] = rec["deleted_count"] if rec else 0; await cursor.consume()
+                    logger.info(f"  Deleted {deleted_counts['products']} non-demoted Products.")
+                
+                # 6. Delete Chunks
+                if chunk_uuids_of_source:
+                    cursor = await tx.run(cypher_queries.DELETE_CHUNKS_BY_UUIDS_DETACH, chunk_uuids=chunk_uuids_of_source)
+                    rec = await cursor.single(); deleted_counts["chunks"] = rec["deleted_count"] if rec else 0; await cursor.consume()
+                    logger.info(f"  Deleted {deleted_counts['chunks']} Chunks.")
+
+                # 7. Delete Source
+                cursor = await tx.run(cypher_queries.DELETE_SOURCE_BY_UUID_DETACH, source_uuid=source_uuid)
+                rec = await cursor.single(); deleted_counts["sources"] = rec["deleted_count"] if rec else 0; await cursor.consume()
+                if deleted_counts["sources"] > 0: logger.info(f"  Deleted Source {source_uuid}.")
+                else: logger.warning(f"  Source {source_uuid} not found for deletion.")
+
+                await tx.commit()
+                logger.info(f"NodeManager: Source deletion for {source_uuid} committed. Counts: {deleted_counts}")
+            except Exception as e:
+                logger.error(f"NodeManager: Error during deletion for Source {source_uuid}. Rolling back. Error: {e}", exc_info=True)
+                if not tx.closed(): await tx.rollback()
+                raise
+            finally:
+                if not tx.closed(): await tx.rollback()
+        return deleted_counts
+    
+    
+    async def delete_orphaned_entities(self) -> int:
+        """
+        Deletes :Entity nodes that have no incoming :MENTIONS relationships
+        and no :RELATES_TO relationships (either incoming or outgoing).
+        This is intended as a cleanup step after ingestion or major deletions.
+        Returns the count of deleted orphaned entities.
+        """
+        logger.info("NodeManager: Attempting to delete orphaned :Entity nodes...")
+        
+        deleted_count = 0
+        try:
+            async with self.driver.session(database=self.database) as session:
+                # Use the imported Cypher query
+                result_cursor = await session.run(cypher_queries.DELETE_ORPHANED_ENTITIES)
+                record = await result_cursor.single()
+                await result_cursor.consume() # Ensure the result is fully consumed
+                if record and record["deleted_count"] is not None:
+                    deleted_count = record["deleted_count"]
+            
+            if deleted_count > 0:
+                logger.info(f"NodeManager: Successfully deleted {deleted_count} orphaned :Entity nodes.")
+            else:
+                logger.info("NodeManager: No orphaned :Entity nodes found to delete.")
+            return deleted_count
+        except Exception as e:
+            logger.error(f"NodeManager: Error during orphaned entity deletion: {e}", exc_info=True)
+            return 0 # Return 0 or raise, depending on desired error handling

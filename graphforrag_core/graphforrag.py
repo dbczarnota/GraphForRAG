@@ -89,7 +89,10 @@ class GraphForRAG:
             raise
         finally:
             logger.debug(f"GraphForRAG __init__ took {(time.perf_counter() - init_start_time)*1000:.2f} ms")
+            
 
+    
+    
     def _ensure_services_llm_client(self) -> Any:
         if self._services_llm_client is None:
             if self._llm_client_input:
@@ -175,33 +178,68 @@ class GraphForRAG:
     
     async def add_documents_from_source(
         self,
-        source_data_block: dict, # CHANGED: was source_identifier, documents_data, etc.
-        # source_identifier: str, # REMOVED
-        # documents_data: List[dict],  # REMOVED
-        # source_content: Optional[str] = None, # REMOVED
-        # source_dynamic_metadata: Optional[dict] = None, # REMOVED
-        allow_same_name_chunks_for_this_source: bool = True # This can probably be removed too if not used
+        source_data_block: dict, 
     ) -> Tuple[Optional[str], List[str]]:
         # Ensure LLM services are ready if they'll be needed during ingestion
         _ = self.entity_extractor 
         _ = self.entity_resolver
         _ = self.relationship_extractor
         
-        # add_documents_to_knowledge_base now expects the whole source_definition_block
-        source_node_uuid, added_chunk_uuids, gen_usage_for_set, embed_usage_for_set = await add_documents_to_knowledge_base(
-            source_definition_block=source_data_block, # PASS THE WHOLE BLOCK
+        # Correctly unpack the return values from add_documents_to_knowledge_base
+        source_node_uuid, processed_item_node_uuids, gen_usage_for_set, embed_usage_for_set = await add_documents_to_knowledge_base(
+            source_definition_block=source_data_block, 
             node_manager=self.node_manager,
             embedder=self.embedder,
             entity_extractor=self.entity_extractor, 
             entity_resolver=self.entity_resolver,   
             relationship_extractor=self.relationship_extractor
-            # source_content and source_dynamic_metadata are now inside source_data_block
-            # allow_same_name_chunks_for_this_source is not used by add_documents_to_knowledge_base
         )
         self._accumulate_generative_usage(gen_usage_for_set)
         self._accumulate_embedding_usage(embed_usage_for_set)
-        return source_node_uuid, added_chunk_uuids
+        
+        # Use the correctly named variable for the condition
+        if source_node_uuid or processed_item_node_uuids: # Only run cleanup if something was potentially added/changed
+            logger.info(f"GraphForRAG: Running orphaned entity cleanup after ingesting source: {source_data_block.get('name', 'Unknown Source')}")
+            await self.cleanup_orphaned_entities()
+            
+        return source_node_uuid, processed_item_node_uuids # Return the correctly named variable
+    
+    
+    # Inside GraphForRAG class in graphforrag_core/graphforrag.py
+    async def delete_source(self, source_uuid: str) -> Dict[str, int]:
+        logger.info(f"GraphForRAG: Request to delete source UUID: {source_uuid}")
+        # Optional: Add pre-checks here, e.g., confirm source_uuid exists.
+        # For example:
+        # source_exists_res, _, _ = await self.driver.execute_query(
+        #     "MATCH (s:Source {uuid: $uuid}) RETURN count(s) > 0 AS exists",
+        #     uuid=source_uuid, database_=self.database
+        # )
+        # if not (source_exists_res and source_exists_res[0]["exists"]):
+        #     logger.warning(f"Source with UUID {source_uuid} not found. Skipping deletion.")
+        #     return {} # Or raise an error
 
+        deletion_summary = await self.node_manager.delete_source_and_derived_data(source_uuid)
+        logger.info(f"GraphForRAG: Deletion process for source {source_uuid} completed. Summary: {deletion_summary}")
+        if deletion_summary.get("sources", 0) > 0 or \
+           deletion_summary.get("chunks", 0) > 0 or \
+           deletion_summary.get("products", 0) > 0 or \
+           deletion_summary.get("products_demoted", 0) > 0: # Only run cleanup if significant nodes were affected
+            logger.info(f"GraphForRAG: Running orphaned entity cleanup after deleting source: {source_uuid}")
+            await self.cleanup_orphaned_entities()
+        else:
+            logger.info(f"GraphForRAG: Skipping orphaned entity cleanup as no primary nodes seem to have been deleted for source: {source_uuid}")
+        
+        return deletion_summary
+    
+    async def cleanup_orphaned_entities(self) -> int:
+        """
+        Calls the NodeManager to delete any truly orphaned Entity nodes.
+        """
+        logger.info("GraphForRAG: Initiating cleanup of orphaned entities...")
+        deleted_count = await self.node_manager.delete_orphaned_entities()
+        logger.info(f"GraphForRAG: Orphaned entity cleanup complete. Deleted {deleted_count} entities.")
+        return deleted_count
+    
     async def search(
         self, 
         query_text: str, 

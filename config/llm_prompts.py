@@ -149,17 +149,18 @@ Identify and extract all clear, factual, and directional relationships **strictl
 For each relationship, provide:
 1.  `source_entity_name`: The exact name of the source entity from the "IDENTIFIED ENTITIES" list.
 2.  `target_entity_name`: The exact name of the target entity from the "IDENTIFIED ENTITIES" list. The source and target must be different.
-3.  `relation_label`: A concise label for the relationship in SCREAMING_SNAKE_CASE (e.g., VISITED, ATE, IS_FRIEND_OF, POSSESSES, PART_OF, CAUSED_BY, ANNOUNCED_PRODUCT). Be specific but not overly granular. Prefer active voice where possible (e.g., "POOH_ATE_HONEY" rather than "HONEY_WAS_EATEN_BY_POOH" if Pooh is the actor).
+3.  `relation_label`: A concise label for the relationship in SCREAMING_SNAKE_CASE (e.g., VISITED, ATE, IS_FRIEND_OF, POSSESSES, PART_OF, CAUSED_BY, ANNOUNCED_PRODUCT, HAS_FEATURE, INCLUDES_COMPONENT, USES_TECHNOLOGY). Be specific but not overly granular. Prefer active voice where possible (e.g., "POOH_ATE_HONEY" rather than "HONEY_WAS_EATEN_BY_POOH" if Pooh is the actor).
 4.  `fact_sentence`: A complete, natural language sentence, ideally 30 words or less, that clearly states the relationship between the source and target entity. This sentence should be directly derivable from the "CURRENT TEXT". For example: "Winnie-the-Pooh ate a jar of honey." or "Rabbit owns the house where Pooh got stuck."
 
 Guidelines:
 - Only extract relationships where **both the source and target entities are explicitly present by name in the "IDENTIFIED ENTITIES" list provided above.**
 - Ensure `source_entity_name` and `target_entity_name` **exactly match** names from the provided "IDENTIFIED ENTITIES" list.
-- Do NOT invent entities or use concepts as targets/sources if they are not in the "IDENTIFIED ENTITIES" list. For example, if "Speed" or "Demanding Tasks" are not in the list, do not use them as a source or target.
+- Do NOT invent entities or use concepts as targets/sources if they are not in the "IDENTIFIED ENTITIES" list.
 - Relationships should be directional (source -> target).
 - Do not extract attributes of a single entity as a relationship (e.g., "Pooh is a bear" is an attribute/classification, not a relationship between two distinct entities from the provided list unless "Bear" itself was also an identified entity).
 - Avoid overly generic labels like "RELATED_TO" if a more specific one applies.
 - If multiple sentences in the text describe the same core relationship between the same two entities, synthesize it into one representative `fact_sentence` and a single `relation_label`.
+- **If the "IDENTIFIED ENTITIES" list contains a primary subject whose description constitutes the "CURRENT TEXT" (e.g., a Product node and its description), prioritize finding relationships FROM this primary subject TO other entities mentioned within its description. Use meaningful labels like HAS_FEATURE, INCLUDES_COMPONENT, USES_TECHNOLOGY, etc., where appropriate.**
 - If no clear relationships meeting these strict criteria are found in the text, return an empty list for "relationships".
 """
 

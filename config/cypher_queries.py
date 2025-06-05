@@ -190,8 +190,8 @@ ORDER BY score DESC
 """
 
 MERGE_RELATIONSHIP = """
-MATCH (source:Entity {uuid: $source_entity_uuid_param})
-MATCH (target:Entity {uuid: $target_entity_uuid_param})
+MATCH (source {uuid: $source_entity_uuid_param}) // REMOVED :Entity label constraint
+MATCH (target {uuid: $target_entity_uuid_param}) // REMOVED :Entity label constraint
 MERGE (source)-[rel:RELATES_TO {
     relation_label: $relation_label_param, 
     fact_sentence: $fact_sentence_param 
@@ -533,3 +533,155 @@ UNWIND keys(properties(n)) AS key
 WITH DISTINCT key WHERE NOT key IN $excluded_props_param 
 RETURN key
 """
+
+# --- Orphaned Entity Cleanup ---
+DELETE_ORPHANED_ENTITIES = """
+MATCH (e:Entity)
+OPTIONAL MATCH (origin)-[:MENTIONS]->(e)
+OPTIONAL MATCH (e)-[rel_relates_to:RELATES_TO]-()
+WITH e, collect(DISTINCT origin) AS mention_origins, collect(DISTINCT rel_relates_to) AS all_relates_to
+WHERE size(mention_origins) = 0 AND size(all_relates_to) = 0
+WITH e // Ensure 'e' is carried over for deletion; not strictly necessary here but good practice if more clauses followed
+DETACH DELETE e
+RETURN count(e) AS deleted_count
+"""
+
+# ... (at an appropriate place, perhaps grouped with other deletion/lifecycle queries)
+
+# --- Source Deletion Queries ---
+GET_CHUNKS_FOR_SOURCE = "MATCH (s:Source {uuid: $source_uuid})<-[:BELONGS_TO_SOURCE]-(c:Chunk) RETURN c.uuid AS node_uuid"
+GET_PRODUCTS_FOR_SOURCE = "MATCH (s:Source {uuid: $source_uuid})<-[:BELONGS_TO_SOURCE]-(p:Product) RETURN p.uuid AS node_uuid"
+
+GET_MENTIONED_TARGETS_BY_ORIGINS = """
+MATCH (origin_node)-[:MENTIONS]->(target_node)
+WHERE origin_node.uuid IN $origin_uuids
+RETURN DISTINCT target_node.uuid AS target_uuid, target_node.name AS target_name, labels(target_node) AS target_labels
+"""
+
+# Query for collecting a broader set of potentially orphaned nodes
+GET_POTENTIAL_ORPHANS_CONNECTED_TO_ORIGINS = """
+UNWIND $origin_uuids AS origin_uuid
+MATCH (origin_node {uuid: origin_uuid})
+// Explicitly pass origin_node into the CALL subquery scope if it's used across UNIONs
+// The parameter $origin_uuids is globally available to all parts of the subquery.
+CALL {
+    WITH origin_node // origin_node is needed in all UNION parts
+    MATCH (origin_node)-[:MENTIONS]->(target)
+    RETURN target AS candidate_node
+    UNION
+    WITH origin_node // origin_node is needed
+    MATCH (origin_node)-[r:RELATES_TO]->(target)
+    WHERE r.source_chunk_uuid = origin_node.uuid
+    RETURN target AS candidate_node
+    UNION
+    WITH origin_node // origin_node is needed
+    MATCH (source_entity)-[r:RELATES_TO]->(origin_node)
+    // $origin_uuids is directly accessible here as it's a query parameter
+    WHERE r.source_chunk_uuid = origin_node.uuid 
+          OR (r.source_chunk_uuid IN $origin_uuids AND r.source_chunk_uuid <> origin_node.uuid) 
+    RETURN source_entity AS candidate_node
+}
+WITH candidate_node // Apply WHERE after CALL
+WHERE (candidate_node:Entity OR candidate_node:Product) 
+RETURN DISTINCT candidate_node.uuid AS node_uuid, 
+                candidate_node.name AS node_name, 
+                labels(candidate_node) AS node_labels
+"""
+
+DELETE_RELATES_TO_BY_SOURCE_CHUNK_UUIDS = """
+MATCH ()-[r:RELATES_TO]->()
+WHERE r.source_chunk_uuid IN $origin_uuids
+WITH r, r.uuid as rel_uuid
+DELETE r
+RETURN count(rel_uuid) as deleted_count
+"""
+
+DELETE_MENTIONS_BY_ORIGIN_UUIDS = "MATCH (origin_node)-[m:MENTIONS]->() WHERE origin_node.uuid IN $origin_uuids DELETE m RETURN count(m) as total_deleted"
+
+CHECK_ENTITY_MENTIONED_BY_OTHERS = """
+MATCH (other_origin)-[:MENTIONS]->(e:Entity {uuid: $entity_uuid})
+WHERE NOT other_origin.uuid IN $deleted_origin_uuids
+RETURN count(other_origin) > 0 AS is_mentioned_by_others
+"""
+
+CHECK_ENTITY_HAS_OTHER_RELATIONSHIPS = """
+MATCH (e:Entity {uuid: $entity_uuid})-[r:RELATES_TO]-()
+WHERE NOT r.source_chunk_uuid IN $deleted_origin_uuids OR r.source_chunk_uuid IS NULL
+RETURN count(r) > 0 AS has_other_relationships
+"""
+
+DELETE_ENTITIES_BY_UUIDS = "MATCH (e:Entity) WHERE e.uuid IN $entity_uuids DETACH DELETE e RETURN count(e) as deleted_count"
+
+GET_PRODUCT_DETAILS_FOR_DEMOTION = "MATCH (p:Product {uuid: $uuid}) RETURN p.name AS name, p.category AS category"
+
+CHECK_PRODUCT_MENTIONED_EXTERNALLY = """
+MATCH (other_origin)-[m:MENTIONS]->(p:Product {uuid: $product_uuid})
+WHERE NOT other_origin.uuid IN $deleted_origin_uuids
+RETURN count(m) > 0 AS is_mentioned_externally
+"""
+
+CHECK_PRODUCT_RELATED_EXTERNALLY_AS_TARGET = """
+MATCH (other_node)-[r:RELATES_TO]->(p:Product {uuid: $product_uuid})
+WHERE (r.source_chunk_uuid IS NOT NULL AND NOT r.source_chunk_uuid IN $deleted_origin_uuids) OR 
+      (r.source_chunk_uuid IS NULL AND NOT other_node.uuid IN $deleted_origin_uuids) 
+RETURN count(r) > 0 AS is_related_to_as_target_externally
+"""
+
+CREATE_DEMOTED_ENTITY_FROM_PRODUCT = """
+CREATE (e:Entity {
+    uuid: $new_uuid,
+    name: $name,
+    label: $label,
+    original_product_uuid: $original_uuid,
+    demoted_at: datetime(),
+    source_of_demotion_info: 'Demoted from Product due to source deletion'
+})
+"""
+
+RELINK_MENTIONS_TO_DEMOTED_ENTITY = """
+MATCH (origin_node)-[old_m:MENTIONS]->(p:Product {uuid: $original_product_uuid})
+WHERE NOT origin_node.uuid IN $deleted_origin_uuids 
+WITH origin_node, old_m, p
+MATCH (demoted_e:Entity {uuid: $new_demoted_entity_uuid})
+CREATE (origin_node)-[new_m:MENTIONS]->(demoted_e)
+SET new_m = properties(old_m)
+REMOVE new_m.uuid 
+SET new_m.uuid = randomUUID()  // CHANGED from apoc.create.uuid()
+DELETE old_m
+RETURN count(new_m) as relinked_count
+"""
+
+RELINK_INCOMING_RELATES_TO_TO_DEMOTED_ENTITY = """
+MATCH (origin_node)-[old_r:RELATES_TO]->(p:Product {uuid: $original_product_uuid})
+WHERE (old_r.source_chunk_uuid IS NOT NULL AND NOT old_r.source_chunk_uuid IN $deleted_origin_uuids) OR
+      (old_r.source_chunk_uuid IS NULL AND NOT origin_node.uuid IN $deleted_origin_uuids)
+WITH origin_node, old_r, p
+MATCH (demoted_e:Entity {uuid: $new_demoted_entity_uuid})
+CREATE (origin_node)-[new_r:RELATES_TO]->(demoted_e)
+SET new_r = properties(old_r)
+REMOVE new_r.uuid
+SET new_r.uuid = randomUUID() // CHANGED from apoc.create.uuid()
+DELETE old_r
+RETURN count(new_r) as relinked_count
+"""
+
+RELINK_OUTGOING_RELATES_TO_FROM_DEMOTED_ENTITY = """
+MATCH (p:Product {uuid: $original_product_uuid})-[old_r:RELATES_TO]->(target_node)
+WITH p, old_r, target_node
+MATCH (demoted_e:Entity {uuid: $new_demoted_entity_uuid})
+CREATE (demoted_e)-[new_r:RELATES_TO]->(target_node)
+SET new_r = properties(old_r)
+SET new_r.source_chunk_uuid = CASE 
+                              WHEN old_r.source_chunk_uuid = $original_product_uuid THEN $new_demoted_entity_uuid
+                              ELSE old_r.source_chunk_uuid
+                            END
+REMOVE new_r.uuid
+SET new_r.uuid = randomUUID() // CHANGED from apoc.create.uuid()
+DELETE old_r
+RETURN count(new_r) as relinked_count
+"""
+
+DELETE_PRODUCT_BY_UUID_DETACH = "MATCH (p:Product {uuid: $uuid}) DETACH DELETE p RETURN count(p) as deleted_product_count" # Used for demoted products
+DELETE_PRODUCTS_BY_UUIDS_DETACH = "MATCH (p:Product) WHERE p.uuid IN $product_uuids DETACH DELETE p RETURN count(p) as deleted_count" # Used for non-demoted products
+DELETE_CHUNKS_BY_UUIDS_DETACH = "MATCH (c:Chunk) WHERE c.uuid IN $chunk_uuids DETACH DELETE c RETURN count(c) as deleted_count"
+DELETE_SOURCE_BY_UUID_DETACH = "MATCH (s:Source {uuid: $source_uuid}) DETACH DELETE s RETURN count(s) as deleted_count"

@@ -109,9 +109,188 @@ async def _process_single_item_for_kb(
                     if content_embed_usage: current_item_embedding_usage += content_embed_usage
                     if content_embedding: await node_manager.set_product_content_embedding(final_item_node_uuid, content_embedding)
             logger.debug(f"    Product '{item_name}' (UUID: {final_item_node_uuid}) processed.")
-        else:
-            logger.error(f"    Failed to create or promote product node for '{item_name}'.")
-        
+        # <<< START OF LOGIC FOR ENTITY EXTRACTION FROM PRODUCT CONTENT (plain text) >>>
+        if final_item_node_uuid and entity_extractor and product_content_as_string_for_node: # product_content_as_string_for_node is now plain text
+            logger.info(f"    Attempting entity extraction from Product '{item_name}' (UUID: {final_item_node_uuid}) textual content.")
+            
+            text_to_extract_from = product_content_as_string_for_node # Directly use the product's content string
+
+            if text_to_extract_from.strip():
+                # Log the text being sent to the extractor for product content
+                logger.debug(f"      Text for entity extraction from Product '{item_name}': \"{text_to_extract_from[:150]}...\"")
+
+                product_extracted_entities_list_model, product_extractor_usage = await entity_extractor.extract_entities(
+                    text_content=text_to_extract_from, 
+                    context_text=None # Products generally don't have prior chunk context for this purpose
+                )
+                if product_extractor_usage: current_item_generative_usage += product_extractor_usage # Accumulate usage
+
+                if product_extracted_entities_list_model.entities:
+                    logger.info(f"      Extracted {len(product_extracted_entities_list_model.entities)} entities from Product '{item_name}' content:")
+                    for idx, eee_product in enumerate(product_extracted_entities_list_model.entities):
+                        logger.info(f"        {idx+1}. Name: '{eee_product.name}', Label: '{eee_product.label}', Fact: '{eee_product.fact_sentence_about_mention}'")
+                    # Storing these extracted entities for future resolution and relationship steps
+                    # For now, we just log them. This list would be used in subsequent iterations:
+                    # resolved_entities_from_product_content: List[ResolvedEntityInfo] = [] # Placeholder for future
+                    resolved_entities_from_product_content: List[ResolvedEntityInfo] = []
+                    if product_extracted_entities_list_model.entities:
+                        logger.info(f"    --- Starting Entity Resolution for Product '{item_name}' content ---")
+                        for extracted_entity_data_model in product_extracted_entities_list_model.entities:
+                            entity_data: ExtractedEntity = extracted_entity_data_model
+                            
+                            resolution_decision, resolver_gen_usage, resolver_embed_usage = await entity_resolver.resolve_entity(entity_data)
+                            
+                            if resolver_gen_usage: current_item_generative_usage += resolver_gen_usage
+                            if resolver_embed_usage: current_item_embedding_usage += resolver_embed_usage
+                            
+                            canonical_name_from_resolver = resolution_decision.canonical_name
+                            fact_sentence_for_mention_rel = entity_data.fact_sentence_about_mention
+
+                            # Self-reference check: if the extracted entity resolves to the product itself
+                            if resolution_decision.is_duplicate and resolution_decision.duplicate_of_uuid == final_item_node_uuid:
+                                logger.info(f"      Entity mention '{entity_data.name}' from product content resolved to the product itself (UUID: {final_item_node_uuid}). Skipping self-MENTIONS link.")
+                                # Add the product itself to the list of resolved entities in its own description,
+                                # as it might be part of relationships with other entities mentioned in its description.
+                                resolved_entities_from_product_content.append(ResolvedEntityInfo(uuid=final_item_node_uuid, name=item_name, label="Product"))
+                                continue # Move to the next extracted entity
+
+                            db_node_uuid_to_link: Optional[str] = None
+                            node_type_of_linked_node: Optional[str] = None
+                            final_node_name_in_db: str = canonical_name_from_resolver
+
+                            try:
+                                if resolution_decision.is_duplicate and resolution_decision.duplicate_of_uuid:
+                                    db_node_uuid_to_link = resolution_decision.duplicate_of_uuid
+                                    # Determine if the duplicate is an Entity or Product
+                                    node_labels_result, _, _ = await node_manager.driver.execute_query(
+                                        "MATCH (n {uuid: $uuid}) RETURN labels(n) as node_labels",
+                                        uuid=db_node_uuid_to_link, database_=node_manager.database
+                                    )
+                                    if node_labels_result and node_labels_result[0]["node_labels"]:
+                                        labels_list = node_labels_result[0]["node_labels"]
+                                        if "Product" in labels_list: node_type_of_linked_node = "Product"
+                                        elif "Entity" in labels_list: node_type_of_linked_node = "Entity"
+                                    
+                                    if node_type_of_linked_node == "Product":
+                                        logger.info(f"      Product content entity '{entity_data.name}' resolved as DUPLICATE of existing PRODUCT UUID: '{db_node_uuid_to_link}'.")
+                                        # Fetch the Product's actual name
+                                        product_details_res, _, _ = await node_manager.driver.execute_query("MATCH (p:Product {uuid: $uuid}) RETURN p.name as name", uuid=db_node_uuid_to_link, database_=node_manager.database) # type: ignore
+                                        if product_details_res and product_details_res[0]: final_node_name_in_db = product_details_res[0].get("name", canonical_name_from_resolver)
+
+                                    elif node_type_of_linked_node == "Entity":
+                                        logger.info(f"      Product content entity '{entity_data.name}' resolved as DUPLICATE of existing ENTITY UUID: '{db_node_uuid_to_link}'.")
+                                        # Potentially update existing Entity's name if resolver suggests a better one
+                                        node_details = await node_manager.fetch_entity_details(db_node_uuid_to_link)
+                                        current_db_name = None
+                                        if node_details: _, current_db_name, _ = node_details
+                                        final_node_name_in_db = current_db_name if current_db_name else canonical_name_from_resolver
+                                        if canonical_name_from_resolver and current_db_name and \
+                                           len(canonical_name_from_resolver) > len(current_db_name) and \
+                                           canonical_name_from_resolver != current_db_name:
+                                            if await node_manager.update_entity_name(db_node_uuid_to_link, canonical_name_from_resolver, created_at_ts):
+                                                final_node_name_in_db = canonical_name_from_resolver
+                                        elif not current_db_name and canonical_name_from_resolver:
+                                            if await node_manager.update_entity_name(db_node_uuid_to_link, canonical_name_from_resolver, created_at_ts):
+                                                final_node_name_in_db = canonical_name_from_resolver
+                                        else: # Just update timestamp if name doesn't change or isn't better
+                                            await node_manager.driver.execute_query("MATCH (e:Entity {uuid: $uuid}) SET e.updated_at = $ts", uuid=db_node_uuid_to_link, ts=created_at_ts, database_=node_manager.database) # type: ignore
+                                    else: # Fallback if type determination failed after claiming duplicate
+                                        db_node_uuid_to_link = None; node_type_of_linked_node = None
+                                
+                                if not db_node_uuid_to_link: # If resolution claimed duplicate but failed to confirm type or UUID
+                                    logger.warning(f"      Product content entity '{entity_data.name}' resolution claimed duplicate but target {resolution_decision.duplicate_of_uuid} not found or type indeterminate. Treating as new Entity.")
+
+                                if not db_node_uuid_to_link: # Process as new if not a valid duplicate or if fallback from failed duplicate
+                                    node_type_of_linked_node = "Entity" # Default to creating an Entity
+                                    new_entity_uuid_val = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{normalize_entity_name(canonical_name_from_resolver)}_{entity_data.label}"))
+                                    logger.info(f"      Product content entity '{entity_data.name}' resolved as NEW ENTITY. Name: '{canonical_name_from_resolver}', Target UUID: {new_entity_uuid_val}")
+                                    final_node_name_in_db = canonical_name_from_resolver
+                                    merge_result = await node_manager.merge_or_create_entity_node(
+                                        entity_uuid_to_create_if_new=new_entity_uuid_val, name_for_create=final_node_name_in_db,
+                                        normalized_name_for_merge=normalize_entity_name(canonical_name_from_resolver), label_for_merge=entity_data.label,
+                                        created_at_ts=created_at_ts
+                                    )
+                                    if merge_result:
+                                        db_node_uuid_to_link = merge_result[0]
+                                        final_node_name_in_db = merge_result[1] if merge_result[1] else final_node_name_in_db
+                                        # Embed name for new Entity
+                                        if embedder and final_node_name_in_db:
+                                            name_embedding, name_embed_usage = await embedder.embed_text(final_node_name_in_db)
+                                            if name_embed_usage: current_item_embedding_usage += name_embed_usage
+                                            if name_embedding: await node_manager.set_entity_name_embedding(db_node_uuid_to_link, name_embedding)
+                                    else:
+                                        logger.error(f"      Failed to MERGE/CREATE new entity '{canonical_name_from_resolver}' from product content."); continue
+                                
+                                if db_node_uuid_to_link and node_type_of_linked_node and final_item_node_uuid: # final_item_node_uuid is the Product's UUID
+
+                                    resolved_entities_from_product_content.append(ResolvedEntityInfo(uuid=db_node_uuid_to_link, name=final_node_name_in_db, label=entity_data.label if node_type_of_linked_node == "Entity" else "Product"))
+                                    logger.debug(f"      Added '{final_node_name_in_db}' (UUID: {db_node_uuid_to_link}) to list for relationship extraction from product content.")
+                                else:
+                                    logger.warning(f"      Skipping add to resolved list for entity '{entity_data.name}' from product content as db_node_uuid_to_link or node_type was not established.")
+                            except Exception as e_entity_processing_loop_product:
+                                logger.error(f"      Error in entity processing loop (from product content) for '{entity_data.name}': {e_entity_processing_loop_product}", exc_info=True)
+                        logger.info(f"    --- Finished Entity Resolution for Product '{item_name}' content ---")
+                    # Ensure the product itself is in the list for relationship extraction
+                    product_itself_info = ResolvedEntityInfo(uuid=final_item_node_uuid, name=item_name, label="Product")
+                    if not any(re.uuid == product_itself_info.uuid for re in resolved_entities_from_product_content):
+                        resolved_entities_from_product_content.insert(0, product_itself_info) # Add to the beginning
+                        logger.debug(f"      Ensured Product '{item_name}' itself is in the context for relationship extraction from its own content.")
+
+                    if final_item_node_uuid and relationship_extractor and resolved_entities_from_product_content: # resolved_entities_from_product_content is populated in the block above
+                        logger.info(f"    --- Starting Relationship Extraction for Product '{item_name}' content (based on {len(resolved_entities_from_product_content)} resolved entities) ---")
+                        
+                        # Prepare entities for relationship extraction (needs name and label)
+                        entities_for_rel_extraction_from_product = [
+                            ExtractedEntity(name=e.name, label=e.label, fact_sentence_about_mention=None) # fact_sentence not strictly needed by rel_extractor here
+                            for e in resolved_entities_from_product_content
+                        ]
+
+                        if len(entities_for_rel_extraction_from_product) >= 2: # Need at least two entities for a relationship
+                            product_extracted_relationships_list_model, product_rel_extractor_usage = await relationship_extractor.extract_relationships(
+                                text_content=text_to_extract_from, # This is the product's textual content
+                                entities_in_chunk=entities_for_rel_extraction_from_product
+                            )
+                            if product_rel_extractor_usage: current_item_generative_usage += product_rel_extractor_usage
+
+                            if product_extracted_relationships_list_model.relationships:
+                                logger.info(f"      Extracted {len(product_extracted_relationships_list_model.relationships)} relationships from Product '{item_name}' content.")
+                                entity_name_to_uuid_map_for_product_rels: Dict[str, str] = {
+                                    entity.name: entity.uuid for entity in resolved_entities_from_product_content
+                                }
+                                for rel_data in product_extracted_relationships_list_model.relationships:
+                                    source_uuid = entity_name_to_uuid_map_for_product_rels.get(rel_data.source_entity_name)
+                                    target_uuid = entity_name_to_uuid_map_for_product_rels.get(rel_data.target_entity_name)
+
+                                    if not source_uuid or not target_uuid or source_uuid == target_uuid:
+                                        logger.warning(f"        Skipping relationship '{rel_data.relation_label}' due to missing/identical source/target UUIDs from product content map.")
+                                        continue
+                                    
+                                    # The product's UUID (final_item_node_uuid) acts as the 'source_chunk_uuid' for these relationships
+                                    relationship_uuid_from_product = await node_manager.create_or_merge_relationship(
+                                        source_entity_uuid=source_uuid,
+                                        target_entity_uuid=target_uuid,
+                                        relation_label=rel_data.relation_label,
+                                        fact_sentence=rel_data.fact_sentence,
+                                        source_chunk_uuid=final_item_node_uuid, # Product's UUID
+                                        created_at_ts=created_at_ts
+                                    )
+                                    if relationship_uuid_from_product and embedder:
+                                        fact_embedding, fact_embed_usage = await embedder.embed_text(rel_data.fact_sentence)
+                                        if fact_embed_usage: current_item_embedding_usage += fact_embed_usage
+                                        if fact_embedding:
+                                            await node_manager.set_relationship_fact_embedding(relationship_uuid_from_product, fact_embedding)
+                                            logger.debug(f"        Stored fact_embedding for RELATES_TO {relationship_uuid_from_product} from product content.")
+                            else:
+                                logger.info(f"      No relationships extracted from Product '{item_name}' content.")
+                        else:
+                            logger.info(f"      Skipping relationship extraction for Product '{item_name}' content as fewer than 2 entities were resolved from its description.")
+                        logger.info(f"    --- Finished Relationship Extraction for Product '{item_name}' content ---")                        
+                else:
+                    logger.info(f"      No entities extracted from Product '{item_name}' content (text was: '{text_to_extract_from[:150]}...').")
+            else:
+                logger.info(f"      Skipping entity extraction for Product '{item_name}' as its content string is empty or whitespace.")
+        # <<< END OF LOGIC FOR ENTITY EXTRACTION FROM PRODUCT CONTENT >>>
+
     elif node_type == "chunk": 
         logger.debug(f"    Processing as Chunk: '{item_name}' (UUID: {item_node_uuid_str})")
         chunk_number = item_data.get("chunk_number") 
