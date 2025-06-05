@@ -432,7 +432,34 @@ RETURN node.uuid AS uuid, node.name AS name, node.content AS content,
        score, "semantic_content" AS method_source
 """
 
+# --- Mention Search Query Parts (New) ---
+MENTION_SEARCH_KEYWORD_PART = """
+CALL db.index.fulltext.queryRelationships($index_name_keyword_mention_fact, $keyword_query_string_mention_fact, {limit: $keyword_limit_param_mention_fact})
+YIELD relationship, score
+// Match the MENTIONS relationship and its source (Chunk) and target (Entity or Product)
+MATCH (source_node)-[r:MENTIONS]->(target_node) WHERE elementId(r) = elementId(relationship)
+RETURN r.uuid AS uuid, 
+       r.fact_sentence AS fact_sentence,
+       source_node.uuid AS source_node_uuid, // UUID of the Chunk (or other mentioning node)
+       target_node.uuid AS target_node_uuid, // UUID of the Entity/Product being mentioned
+       target_node.name AS name, // Name of the Entity/Product being mentioned
+       labels(target_node) as target_node_labels, // To distinguish Entity from Product target
+       score, "keyword_fact" AS method_source
+"""
 
+MENTION_SEARCH_SEMANTIC_PART = """
+CALL db.index.vector.queryRelationships($index_name_semantic_mention_fact, $semantic_limit_mention_fact, $semantic_embedding_mention_fact)
+YIELD relationship, score
+// Match the MENTIONS relationship and its source (Chunk) and target (Entity or Product)
+MATCH (source_node)-[r:MENTIONS]->(target_node) WHERE elementId(r) = elementId(relationship) AND score >= $semantic_min_score_mention_fact
+RETURN r.uuid AS uuid,
+       r.fact_sentence AS fact_sentence,
+       source_node.uuid AS source_node_uuid, 
+       target_node.uuid AS target_node_uuid,
+       target_node.name AS name,
+       labels(target_node) as target_node_labels,
+       score, "semantic_fact" AS method_source
+"""
 
 
 

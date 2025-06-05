@@ -23,7 +23,8 @@ from .search_types import (
     EntitySearchConfig, EntitySearchMethod, 
     RelationshipSearchConfig, RelationshipSearchMethod,
     SourceSearchConfig, SourceSearchMethod, 
-    ProductSearchConfig, ProductSearchMethod, # ADDED ProductSearchConfig and ProductSearchMethod
+    ProductSearchConfig, ProductSearchMethod,
+    MentionSearchConfig, MentionSearchMethod, # ADDED MentionSearchMethod
     CombinedSearchResults, 
     SearchResultItem,
     MultiQueryConfig
@@ -240,12 +241,14 @@ class GraphForRAG:
             needs_embedding = False
             if config.source_config and SourceSearchMethod.SEMANTIC_CONTENT in config.source_config.search_methods: needs_embedding = True
             if not needs_embedding and config.chunk_config and ChunkSearchMethod.SEMANTIC in config.chunk_config.search_methods: needs_embedding = True
-            if not needs_embedding and config.entity_config and EntitySearchMethod.SEMANTIC_NAME in config.entity_config.search_methods: needs_embedding = True # Entity SEMANTIC_DESCRIPTION removed
+            if not needs_embedding and config.entity_config and EntitySearchMethod.SEMANTIC_NAME in config.entity_config.search_methods: needs_embedding = True 
             if not needs_embedding and config.relationship_config and RelationshipSearchMethod.SEMANTIC_FACT in config.relationship_config.search_methods: needs_embedding = True
-            if not needs_embedding and config.product_config: # ADDED check for product semantic search
+            if not needs_embedding and config.product_config: 
                 if ProductSearchMethod.SEMANTIC_NAME in config.product_config.search_methods or \
                    ProductSearchMethod.SEMANTIC_CONTENT in config.product_config.search_methods:
                     needs_embedding = True
+            if not needs_embedding and config.mention_config and MentionSearchMethod.SEMANTIC_FACT in config.mention_config.search_methods: # ADDED check for mention semantic search
+                needs_embedding = True
             
             if needs_embedding:
                 queries_requiring_embedding.append(q_text)
@@ -305,9 +308,13 @@ class GraphForRAG:
                 s_time = time.perf_counter(); res = await self.search_manager.search_relationships(current_query_text_for_processing, config.relationship_config, current_query_embedding)
                 logger.debug(f"GRAPHFORRAG.search ({query_log_prefix}, TIMING): search_relationships call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
                 if res: all_raw_results_from_search_manager.extend(res)
-            if config.product_config: # ADDED product search call
+            if config.product_config: 
                 s_time = time.perf_counter(); res = await self.search_manager.search_products(current_query_text_for_processing, config.product_config, current_query_embedding)
                 logger.debug(f"GRAPHFORRAG.search ({query_log_prefix}, TIMING): search_products call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
+                if res: all_raw_results_from_search_manager.extend(res)
+            if config.mention_config: # ADDED mention search call
+                s_time = time.perf_counter(); res = await self.search_manager.search_mentions(current_query_text_for_processing, config.mention_config, current_query_embedding)
+                logger.debug(f"GRAPHFORRAG.search ({query_log_prefix}, TIMING): search_mentions call took {(time.perf_counter() - s_time) * 1000:.2f} ms, found {len(res) if res else 0} items.")
                 if res: all_raw_results_from_search_manager.extend(res)
             
             current_query_sequential_search_duration = (time.perf_counter() - sequential_execution_start_time) * 1000
@@ -340,8 +347,10 @@ class GraphForRAG:
             result_type_configs.append({"type": "Relationship", "min": config.relationship_config.min_results, "cfg": config.relationship_config})
         if config.source_config and config.source_config.min_results > 0:
             result_type_configs.append({"type": "Source", "min": config.source_config.min_results, "cfg": config.source_config})
-        if config.product_config and config.product_config.min_results > 0: # ADDED product min_results check
+        if config.product_config and config.product_config.min_results > 0: 
             result_type_configs.append({"type": "Product", "min": config.product_config.min_results, "cfg": config.product_config})
+        if config.mention_config and config.mention_config.min_results > 0: # ADDED Mention min_results check
+            result_type_configs.append({"type": "Mention", "min": config.mention_config.min_results, "cfg": config.mention_config})
 
 
         for type_info in result_type_configs:

@@ -63,6 +63,26 @@ class RelationshipSearchConfig(BaseModel):
     min_similarity_score: float = Field(default=0.7, description="Minimum similarity score for semantic search on relationship facts.")
     rrf_k: int = Field(default=60)
 
+# --- NEW: Mention Search Specific ---
+class MentionSearchMethod(str, Enum):
+    KEYWORD_FACT = "keyword_fact_fulltext"  # Using existing FT index for MENTIONS.fact_sentence
+    SEMANTIC_FACT = "semantic_fact_vector" # Using existing vector index for MENTIONS.fact_embedding
+
+class MentionRerankerMethod(str, Enum):
+    RRF = "reciprocal_rank_fusion"
+
+class MentionSearchConfig(BaseModel):
+    search_methods: List[MentionSearchMethod] = Field(
+        default_factory=lambda: [MentionSearchMethod.KEYWORD_FACT, MentionSearchMethod.SEMANTIC_FACT]
+    )
+    reranker: MentionRerankerMethod = MentionRerankerMethod.RRF
+    limit: int = Field(default=10, description="Final number of Mention results to return if min_results is not dominant.")
+    min_results: int = Field(default=0, ge=0, description="Minimum number of Mention results to try to include, if available.")
+    keyword_fetch_limit: int = Field(default=20)
+    semantic_fetch_limit: int = Field(default=20)
+    min_similarity_score: float = Field(default=0.7, description="Minimum similarity score for semantic search on Mention facts.")
+    rrf_k: int = Field(default=60)
+
 # --- NEW: Source Search Specific ---
 class SourceSearchMethod(str, Enum):
     KEYWORD_CONTENT = "keyword_content_fulltext"
@@ -89,12 +109,12 @@ class SearchResultItem(BaseModel):
     name: Optional[str] = None 
     content: Optional[str] = None # For Chunk, Source, Product (JSON string)
     # description: Optional[str] = None # REMOVED
-    fact_sentence: Optional[str] = None 
+    fact_sentence: Optional[str] = None # For Relationship and Mention
     label: Optional[str] = None # For Entity
-    source_entity_uuid: Optional[str] = None 
-    target_entity_uuid: Optional[str] = None 
+    source_node_uuid: Optional[str] = None # For Relationship and Mention (source of mention, e.g., Chunk)
+    target_node_uuid: Optional[str] = None # For Relationship and Mention (target of mention, e.g., Entity/Product)
     score: float
-    result_type: Literal["Chunk", "Entity", "Relationship", "Source", "Product"] # Added Product here
+    result_type: Literal["Chunk", "Entity", "Relationship", "Source", "Product", "Mention"] # Added Product and Mention here
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class CombinedSearchResults(BaseModel):
@@ -109,10 +129,6 @@ class MultiQueryConfig(BaseModel):
         le=5, 
         description="Maximum number of alternative questions to generate (excluding the original query)."
     )
-    
-    
-
-    
     
 # --- NEW: Product Search Specific ---
 class ProductSearchMethod(str, Enum):
@@ -147,7 +163,8 @@ class SearchConfig(BaseModel):
     entity_config: Optional[EntitySearchConfig] = Field(default_factory=EntitySearchConfig)
     relationship_config: Optional[RelationshipSearchConfig] = Field(default_factory=RelationshipSearchConfig)
     source_config: Optional[SourceSearchConfig] = Field(default_factory=SourceSearchConfig) 
-    product_config: Optional[ProductSearchConfig] = Field(default_factory=ProductSearchConfig) # ADDED
+    product_config: Optional[ProductSearchConfig] = Field(default_factory=ProductSearchConfig) 
+    mention_config: Optional[MentionSearchConfig] = Field(default_factory=MentionSearchConfig) # ADDED Mention config
     mqr_config: Optional[MultiQueryConfig] = Field(default=None, description="Configuration for Multi-Query Retrieval. If None, MQR is disabled.")
     overall_results_limit: Optional[int] = Field(
         default=10, 

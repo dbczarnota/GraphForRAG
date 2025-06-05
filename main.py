@@ -8,7 +8,8 @@ from graphforrag_core.search_types import (
     EntitySearchConfig, EntitySearchMethod, 
     RelationshipSearchConfig, RelationshipSearchMethod, 
     SourceSearchConfig, SourceSearchMethod, 
-    ProductSearchConfig, ProductSearchMethod, # ADDED ProductSearchConfig, ProductSearchMethod
+    ProductSearchConfig, ProductSearchMethod, 
+    MentionSearchConfig, MentionSearchMethod, # ADDED MentionSearchConfig, MentionSearchMethod
     CombinedSearchResults, SearchResultItem,
     MultiQueryConfig 
 )
@@ -24,9 +25,9 @@ import asyncio
 from typing import List, Dict, Any, Optional 
 
 # Ensure logging is at DEBUG for search_manager to see detailed logs
-logging.getLogger("graph_for_rag.search_manager").setLevel(logging.DEBUG)
-logging.getLogger("graph_for_rag.graphforrag").setLevel(logging.DEBUG) 
-logging.getLogger("graph_for_rag.multi_query_generator").setLevel(logging.DEBUG) 
+# logging.getLogger("graph_for_rag.search_manager").setLevel(logging.DEBUG)
+# logging.getLogger("graph_for_rag.graphforrag").setLevel(logging.DEBUG) 
+# logging.getLogger("graph_for_rag.multi_query_generator").setLevel(logging.DEBUG) 
 logging.getLogger("llm_models").setLevel(logging.INFO) 
 
 logging.basicConfig(
@@ -142,11 +143,11 @@ async def main():
                 min_results=2, 
                 keyword_fetch_limit=10, 
                 semantic_fetch_limit=10,
-                min_similarity_score=0.7, # Adjusted from 0.5 for chunks
+                min_similarity_score=0.7, 
                 rrf_k=60
             ),
             entity_config=EntitySearchConfig(
-                search_methods=[ # SEMANTIC_DESCRIPTION is removed
+                search_methods=[ 
                     EntitySearchMethod.KEYWORD_NAME, 
                     EntitySearchMethod.SEMANTIC_NAME, 
                 ],
@@ -160,10 +161,19 @@ async def main():
             relationship_config=RelationshipSearchConfig(
                 search_methods=[RelationshipSearchMethod.KEYWORD_FACT, RelationshipSearchMethod.SEMANTIC_FACT],
                 limit=3, 
-                min_results=1, # Updated min_results for relationships example
+                min_results=1, 
                 keyword_fetch_limit=10, 
                 semantic_fetch_limit=10,
                 min_similarity_score=0.7,
+                rrf_k=60
+            ),
+            mention_config=MentionSearchConfig( # ADDED mention_config section
+                search_methods=[MentionSearchMethod.KEYWORD_FACT, MentionSearchMethod.SEMANTIC_FACT],
+                limit=3,
+                min_results=1,
+                keyword_fetch_limit=10,
+                semantic_fetch_limit=10,
+                min_similarity_score=0.65, # Mentions might be more varied, slightly lower threshold
                 rrf_k=60
             ),
             source_config=SourceSearchConfig( 
@@ -175,19 +185,19 @@ async def main():
                 min_similarity_score=0.7,
                 rrf_k=60
             ),
-            product_config=ProductSearchConfig( # ADDED product_config section
+            product_config=ProductSearchConfig( 
                 search_methods=[
                     ProductSearchMethod.KEYWORD_NAME_CONTENT,
                     ProductSearchMethod.SEMANTIC_NAME,
                     ProductSearchMethod.SEMANTIC_CONTENT
                 ],
-                limit=3, # Max products to consider from *each* MQR query pass
-                min_results=1, # Try to have at least 1 product in the *final* overall results
+                limit=3, 
+                min_results=1, 
                 keyword_fetch_limit=10,
                 semantic_name_fetch_limit=10,
                 semantic_content_fetch_limit=10,
                 min_similarity_score_name=0.7,
-                min_similarity_score_content=0.65, # Content (JSON string) might need lower threshold
+                min_similarity_score_content=0.65, 
                 rrf_k=60
             ),
             mqr_config=MultiQueryConfig( 
@@ -201,10 +211,10 @@ async def main():
         timings["search_config_setup_log"] = (time.perf_counter() - section_start_time) * 1000
         logger.info(f"Using comprehensive search config (setup/log took {timings['search_config_setup_log']:.2f} ms): {config_dump_str}")
 
-        # --- THIS IS THE SEARCH CALL BLOCK THAT WAS MISSING ---
+        
         section_start_time = time.perf_counter()
-        if graph: # Ensure graph object exists
-            if data_exists or run_data_setup : # Only run search if data exists or was just set up
+        if graph: 
+            if data_exists or run_data_setup : 
                 combined_results: CombinedSearchResults = await graph.search(
                     full_search_query, 
                     config=comprehensive_search_config
@@ -218,10 +228,14 @@ async def main():
                         logger.info(f"  --- Result {i+1} ({item.result_type}, Score: {item.score:.4f}) ---")
                         logger.info(f"    UUID: {item.uuid}")
                         if item.name: logger.info(f"    Name: {item.name}")
-                        if item.content: logger.info(f"    Content Snippet: {item.content[:100]}...")
-                        # if item.description: logger.info(f"    Description: {item.description[:100]}...") # REMOVED THIS LINE
-                        if item.fact_sentence: logger.info(f"    Fact: {item.fact_sentence}")
-                        if item.label and item.result_type == "Entity": logger.info(f"    Label: {item.label}") # Added condition for Entity label
+                        if item.content and item.result_type != "Mention": # Don't log content for Mention as it's the fact_sentence
+                            logger.info(f"    Content Snippet: {item.content[:100]}...")
+                        if item.fact_sentence: logger.info(f"    Fact: {item.fact_sentence}") # Covers Relationship and Mention
+                        if item.label and item.result_type == "Entity": logger.info(f"    Label: {item.label}") 
+                        if item.source_node_uuid and item.result_type == "Mention": # Specific for Mention
+                             logger.info(f"    Mention Source (Chunk) UUID: {item.source_node_uuid}")
+                        if item.target_node_uuid and item.result_type == "Mention": # Specific for Mention
+                             logger.info(f"    Mention Target (Entity/Product) UUID: {item.target_node_uuid}")
                         if item.metadata: logger.info(f"    Metadata: {item.metadata}")
                 else:
                     logger.info(f"No combined results found for '{full_search_query}'.")
@@ -231,14 +245,14 @@ async def main():
         else:
             logger.error("Graph object not initialized, skipping comprehensive search call.")
             timings["comprehensive_search_call (graph.search)"] = 0.0
-        # --- END OF RESTORED SEARCH CALL BLOCK ---
+        
         
         logger.info(f"--- Comprehensive Search Test Complete at: {get_current_time_ms()} ---")
         
-        # --- LLM USAGE LOGGING (CORRECTED PLACEMENT) ---
+        
         usage_log_start_time = time.perf_counter()
         if graph: 
-            # Log Generative LLM Usage
+            
             total_gen_usage = graph.get_total_generative_llm_usage()
             if total_gen_usage and total_gen_usage.has_values():
                 gen_details = (f"Requests: {total_gen_usage.requests}, "
@@ -249,7 +263,7 @@ async def main():
             else:
                 logger.info("[bold blue]Total Generative LLM Usage:[/bold blue] No generative usage data reported.")
 
-            # Log Embedding Usage
+            
             total_embed_usage = graph.get_total_embedding_usage()
             if total_embed_usage and total_embed_usage.has_values():
                 embed_details = (f"Requests: {total_embed_usage.requests}, "
@@ -271,7 +285,7 @@ async def main():
         else:
             logger.info("[bold magenta]Overall LLM Usage:[/bold magenta] Graph object not initialized.")
         timings["get_llm_usage"] = (time.perf_counter() - usage_log_start_time) * 1000
-        # --- END LLM USAGE LOGGING ---
+        
 
     except Exception as e:
         logger.error(f"An error occurred in main execution: {e}", exc_info=True)
