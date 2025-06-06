@@ -254,24 +254,58 @@ class GraphForRAG:
         if config is None: 
             logger.info("No search configuration provided, using default SearchConfig.")
             config = SearchConfig()
-        
-        all_queries_to_process: List[str] = [query_text]
+        all_queries_to_process: List[str] = [] 
         total_mqr_generation_duration = 0.0
+        # alternative_queries_list: List[str] = [] # Defined later if needed
 
         if config.mqr_config and config.mqr_config.enabled:
-            logger.info(f"MQR enabled. Generating alternative queries for: '{query_text}'")
-            mqr_start_time = time.perf_counter()
-            alternative_queries_list, mqr_usage = await self.multi_query_generator.generate_alternative_queries(
-                original_query=query_text,
-                max_alternative_questions=config.mqr_config.max_alternative_questions
-            )
-            self._accumulate_generative_usage(mqr_usage)
-            total_mqr_generation_duration = (time.perf_counter() - mqr_start_time) * 1000
-            logger.info(f"MQR: Generation took {total_mqr_generation_duration:.2f} ms. Found {len(alternative_queries_list)} alternatives.")
-            if alternative_queries_list:
+            logger.info(f"MQR enabled. Config: {config.mqr_config.model_dump_json(indent=2, exclude_none=True)}")
+            
+            alternative_queries_list: List[str] = [] # Initialize here
+            
+            # --- Start of modification ---
+            if config.mqr_config.max_alternative_questions > 0:
+                # Only setup/use MQG if we are actually generating alternatives
+                mq_generator_for_this_search: MultiQueryGenerator
+
+                if config.mqr_config.mqr_llm_models is not None:
+                    models_for_mqr_setup = config.mqr_config.mqr_llm_models
+                    log_msg_model_source = models_for_mqr_setup if models_for_mqr_setup else "internal defaults of setup_fallback_model"
+                    logger.info(f"MQR: Setting up specific LLM client for MQR generation using models: {log_msg_model_source}.")
+                    mqr_specific_llm_client = setup_fallback_model(models_for_mqr_setup) 
+                    mq_generator_for_this_search = MultiQueryGenerator(llm_client=mqr_specific_llm_client)
+                else: 
+                    logger.info("MQR: Using default service LLM for MQR generation (via self.multi_query_generator property).")
+                    mq_generator_for_this_search = self.multi_query_generator
+                
+                mqr_start_time = time.perf_counter()
+                generated_alts, mqr_usage = await mq_generator_for_this_search.generate_alternative_queries(
+                    original_query=query_text,
+                    max_alternative_questions=config.mqr_config.max_alternative_questions
+                )
+                self._accumulate_generative_usage(mqr_usage)
+                total_mqr_generation_duration = (time.perf_counter() - mqr_start_time) * 1000
+                if generated_alts: 
+                    alternative_queries_list = generated_alts 
+                logger.info(f"MQR: Generation took {total_mqr_generation_duration:.2f} ms. Found {len(alternative_queries_list)} alternatives.")
+            else:
+                logger.info("MQR: max_alternative_questions is 0, no alternative queries will be generated. LLM setup for MQR (if specific) is skipped.")
+            # --- End of modification ---
+            
+            if config.mqr_config.include_original_query:
+                all_queries_to_process.append(query_text)
+            
+            if alternative_queries_list: 
                 all_queries_to_process.extend(alternative_queries_list)
-                logger.info(f"MQR: Total queries to process: {len(all_queries_to_process)} (Original + {len(alternative_queries_list)} alternatives)")
-        
+            
+            if not all_queries_to_process:
+                logger.warning("MQR is enabled but resulted in no queries to process (original query might be excluded and no alternatives generated/kept). Search will be skipped.")
+                return CombinedSearchResults(query_text=query_text) 
+                
+            logger.info(f"MQR: Total queries to process: {len(all_queries_to_process)} ({'Original included, ' if config.mqr_config.include_original_query else 'Original excluded, '}{len(alternative_queries_list)} alternatives)")
+        else: 
+            all_queries_to_process.append(query_text)
+            logger.info(f"MQR not enabled or no MQR config. Processing original query: '{query_text}'")
         query_to_embedding_map: Dict[str, Optional[List[float]]] = {}
         total_embedding_generation_duration = 0.0
         

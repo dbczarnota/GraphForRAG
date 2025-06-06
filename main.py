@@ -140,9 +140,7 @@ async def main():
         
         comprehensive_search_config = SearchConfig(
             chunk_config=ChunkSearchConfig(
-                search_methods=[
-                    ChunkSearchMethod.KEYWORD, 
-                    ChunkSearchMethod.SEMANTIC],
+                search_methods=[ChunkSearchMethod.KEYWORD, ChunkSearchMethod.SEMANTIC],
                 limit=3, 
                 min_results=2, 
                 keyword_fetch_limit=10, 
@@ -163,9 +161,7 @@ async def main():
                 rrf_k=60
             ),
             relationship_config=RelationshipSearchConfig(
-                search_methods=[
-                    RelationshipSearchMethod.KEYWORD_FACT, 
-                    RelationshipSearchMethod.SEMANTIC_FACT],
+                search_methods=[RelationshipSearchMethod.KEYWORD_FACT, RelationshipSearchMethod.SEMANTIC_FACT],
                 limit=3, 
                 min_results=1, 
                 keyword_fetch_limit=10, 
@@ -173,21 +169,17 @@ async def main():
                 min_similarity_score=0.7,
                 rrf_k=60
             ),
-            mention_config=MentionSearchConfig( # ADDED mention_config section
-                search_methods=[
-                    MentionSearchMethod.KEYWORD_FACT, 
-                    MentionSearchMethod.SEMANTIC_FACT],
+            mention_config=MentionSearchConfig( 
+                search_methods=[MentionSearchMethod.KEYWORD_FACT, MentionSearchMethod.SEMANTIC_FACT],
                 limit=3,
                 min_results=1,
                 keyword_fetch_limit=10,
                 semantic_fetch_limit=10,
-                min_similarity_score=0.65, # Mentions might be more varied, slightly lower threshold
+                min_similarity_score=0.65, 
                 rrf_k=60
             ),
             source_config=SourceSearchConfig( 
-                search_methods=[
-                    SourceSearchMethod.KEYWORD_CONTENT, 
-                    SourceSearchMethod.SEMANTIC_CONTENT],
+                search_methods=[SourceSearchMethod.KEYWORD_CONTENT, SourceSearchMethod.SEMANTIC_CONTENT],
                 limit=2, 
                 min_results=1, 
                 keyword_fetch_limit=5, 
@@ -212,7 +204,14 @@ async def main():
             ),
             mqr_config=MultiQueryConfig( 
                 enabled=True, 
-                max_alternative_questions=4 
+                include_original_query=True, # New field: Default is True, explicitly shown
+                max_alternative_questions=2, # Generates up to 2 alternatives
+                mqr_llm_models=["gpt-4o-mini", "gemini-2.0-flash"]          # New field: None means use main service LLM for MQR
+                # Example: Use specific models for MQR generation
+                # mqr_llm_models=["gpt-4o-mini", "gemini-2.0-flash"] 
+                # Example: Exclude original, only use alternatives (if any generated)
+                # include_original_query=False,
+                # max_alternative_questions=3 
             ),
             overall_results_limit=10 
         )

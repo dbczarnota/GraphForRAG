@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from typing import List
+from typing import List, Optional
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.google_gla import GoogleGLAProvider
 from pydantic_ai.models.openai import OpenAIModel
@@ -17,21 +17,29 @@ load_dotenv()
 
 
 
-def setup_fallback_model(models: List[str] = ["gpt-4.1-mini", "gemini-2.0-flash"]):
+def setup_fallback_model(models: Optional[List[str]] = None): # New signature
     """
     Initialize fallback LLM model based on a list of model names.
     Providers are only initialized if at least one requested model comes from them.
+    If `models` is None or an empty list, uses default internal models.
     
     Args:
-        models (List[str]): List of strings representing the desired model names.
+        models (Optional[List[str]]): List of strings representing the desired model names.
 
     Returns:
         FallbackModel instance if any models were initialized successfully,
         otherwise returns "classification_failed_no_models".
     """
-
-    logger.info("\n[bold blue]--- Initialization Start ---[/bold blue]")
-    logger.info(f"Requested models: {models}")
+    
+    internal_default_models = ["gpt-4.1-mini", "gemini-2.0-flash"] # Define internal default
+    
+    models_to_actually_use = models
+    if not models: # Handles if models is None or an empty list []
+        models_to_actually_use = internal_default_models
+        logger.info(f"No specific models provided (or list was empty) for FallbackModel setup. Using internal defaults: {internal_default_models}")
+ 
+    logger.info("\n[bold blue]--- FallbackModel Initialization Start ---[/bold blue]")
+    logger.info(f"Attempting to initialize FallbackModel with: {models_to_actually_use}")
 
     # Define which models depend on which provider.
     openai_models = {"gpt-4o-mini", "o3-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"}
@@ -43,11 +51,11 @@ def setup_fallback_model(models: List[str] = ["gpt-4.1-mini", "gemini-2.0-flash"
 
 
     # Determine if a provider is needed based on the input list.
-    need_openai = any(model in openai_models for model in models)
-    need_gemini = any(model in gemini_models for model in models)
-    need_groq = any(model in groq_models for model in models)
-    need_openrouter = any(model in openrouter_models for model in models)
-    need_ollama  = any(model in ollama_models for model in models)
+    need_openai = any(model in openai_models for model in models_to_actually_use)
+    need_gemini = any(model in gemini_models for model in models_to_actually_use)
+    need_groq = any(model in groq_models for model in models_to_actually_use)
+    need_openrouter = any(model in openrouter_models for model in models_to_actually_use)
+    need_ollama  = any(model in ollama_models for model in models_to_actually_use)
 
 
     # --- Providers Initialization ---
@@ -163,7 +171,7 @@ def setup_fallback_model(models: List[str] = ["gpt-4.1-mini", "gemini-2.0-flash"
 
     # --- Initialize Only the Requested Models ---
     available_models = []
-    for model_str in models:
+    for model_str in models_to_actually_use:
         initializer = model_initializers.get(model_str)
         if initializer is None:
             logger.warning(f"Model '{model_str}' is not recognized. Skipping it.")

@@ -123,12 +123,22 @@ class CombinedSearchResults(BaseModel):
     
 class MultiQueryConfig(BaseModel):
     enabled: bool = Field(default=False, description="Whether to enable Multi-Query Retrieval.")
+    include_original_query: bool = Field(
+        default=True, 
+        description="Whether to include the original user query in the set of queries to be executed for search. If False, only generated alternative queries will be used."
+    )
     max_alternative_questions: int = Field(
         default=3, 
-        ge=1, 
+        ge=1, # Allow 0 alternative questions if only original is needed with MQR-specific LLM
         le=5, 
-        description="Maximum number of alternative questions to generate (excluding the original query)."
+        description="Maximum number of alternative questions to generate. If 0, and include_original_query is True, only the original query runs (potentially with specific MQR LLM)."
     )
+    mqr_llm_models: Optional[List[str]] = Field(
+        default=None,
+        description="Optional list of LLM model names (e.g., ['gpt-4o-mini', 'gemini-2.0-flash']) to use specifically for MQR generation. If None, uses the default LLM client of the MultiQueryGenerator service."
+    )
+    # Ensure max_alternative_questions constraint still makes sense. If include_original_query is false, ge=1 for max_alternative_questions might be better if enabled=True.
+    # For now, ge=0 is fine, but if enabled=True, include_original_query=False, and max_alternative_questions=0, then MQR effectively does nothing.
     
 # --- NEW: Product Search Specific ---
 class ProductSearchMethod(str, Enum):

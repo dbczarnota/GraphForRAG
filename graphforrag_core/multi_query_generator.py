@@ -30,12 +30,29 @@ class MultiQueryGenerator:
             model=self.llm_client,
             system_prompt=MULTI_QUERY_GENERATION_SYSTEM_PROMPT
         )
-        model_name_for_log = "Unknown"
-        if hasattr(self.llm_client, 'model') and isinstance(self.llm_client.model, str):
-            model_name_for_log = self.llm_client.model
-        elif hasattr(self.llm_client, 'model_name') and isinstance(self.llm_client.model_name, str):
-             model_name_for_log = self.llm_client.model_name
-        logger.info(f"MultiQueryGenerator initialized with LLM: {model_name_for_log}")
+        # --- Start of modification ---
+        logger.info(f"MultiQueryGenerator initialized with LLM: {self._llm_client_display_name}")
+        # --- End of modification ---
+
+    # --- Start of new code ---
+    @property
+    def _llm_client_display_name(self) -> str:
+        """Helper to get a display name for the LLM client, handling FallbackModel."""
+        if hasattr(self.llm_client, 'models') and isinstance(self.llm_client.models, (list, tuple)) and hasattr(self.llm_client.models, '__len__') and len(self.llm_client.models) > 0: # FallbackModel check
+            model_names = []
+            for model_in_fallback in self.llm_client.models:
+                name_found = "UnknownSubModel"
+                if hasattr(model_in_fallback, 'model_name') and isinstance(model_in_fallback.model_name, str):
+                    name_found = model_in_fallback.model_name
+                elif hasattr(model_in_fallback, 'model') and isinstance(model_in_fallback.model, str): # pydantic-ai agent.model can be str
+                    name_found = model_in_fallback.model
+                model_names.append(name_found)
+            return f"FallbackModel({', '.join(model_names)})"
+        elif hasattr(self.llm_client, 'model_name') and isinstance(self.llm_client.model_name, str): 
+            return self.llm_client.model_name
+        elif hasattr(self.llm_client, 'model') and isinstance(self.llm_client.model, str): 
+            return self.llm_client.model
+        return "UnknownLLMClientType"
 
     async def generate_alternative_queries(
         self,
