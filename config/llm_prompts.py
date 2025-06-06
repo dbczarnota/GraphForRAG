@@ -166,36 +166,100 @@ Guidelines:
 
 
 # --- Prompt Templates for Multi-Query Retrieval (MQR) ---
-MULTI_QUERY_GENERATION_SYSTEM_PROMPT = """
-You are an expert AI assistant highly skilled in query understanding and reformulation for retrieval systems. 
-Your task is to generate alternative queries based on the user's original query to improve the chances of finding relevant information in a vector database.
-Adhere strictly to the formatting instructions and the user's language.
-The goal is to explore different phrasings, sub-topics, or perspectives related to the original query.
-Do not include the original query in your list of alternative_queries.
-"""
+# MULTI_QUERY_GENERATION_SYSTEM_PROMPT = """
+# You are an expert AI assistant highly skilled in query understanding and reformulation for retrieval systems. 
+# Your task is to generate alternative queries based on the user's original query to improve the chances of finding relevant information in a vector database.
+# Adhere strictly to the formatting instructions and the user's language.
+# The goal is to explore different phrasings, sub-topics, or perspectives related to the original query.
+# Do not include the original query in your list of alternative_queries.
+# """
 
-MULTI_QUERY_GENERATION_USER_PROMPT_TEMPLATE = """
-Based on the "Original User Query" below, generate up to {max_alternative_questions} alternative user queries.
-These alternative queries should help retrieve a more diverse and comprehensive set of relevant documents from a vector database.
+# MULTI_QUERY_GENERATION_USER_PROMPT_TEMPLATE = """
+# Based on the "Original User Query" below, generate up to {max_alternative_questions} alternative user queries.
+# These alternative queries should help retrieve a more diverse and comprehensive set of relevant documents from a vector database.
+
+# Guidelines:
+# - **If the user’s original query references multiple distinct entities or concepts**, ensure that:
+#     - At least one, and ideally the first one or two, alternative queries rephrase the original query to capture the combined intent, possibly using synonyms or different sentence structures.
+#     - Subsequent alternative queries can break down the original query by focusing on individual entities/concepts or different aspects/perspectives of the original query. For example, if the original query is "Compare the performance of Dell XPS 13 and MacBook Air M3 for students", alternatives could be "Student experiences with Dell XPS 13" and "MacBook Air M3 suitability for college work".
+# - **If the user’s original query includes specific dates, times, or numerical values**, try to incorporate these accurately into relevant alternative queries or generate queries that explore related timeframes or values if appropriate.
+# - **Maintain the original language** used by the user in all generated alternative queries.
+# - **Focus on semantic alternatives**: Think about different ways someone might ask for the same or related information.
+# - **Generate distinct queries**: Each alternative query should offer a unique angle or phrasing.
+# - **Do NOT include the original query itself in the list of `alternative_queries` you generate.**
+
+# Original User Query:
+# "{original_user_query}"
+
+# Current date (for context, if relevant to the query): {current_date}
+# Current day of the week (for context, if relevant, e.g., for "tomorrow", "yesterday"): {current_day_of_a_week}
+
+# Generate the alternative queries.
+# """
+
+# MULTI_QUERY_GENERATION_SYSTEM_PROMPT=""
+# MULTI_QUERY_GENERATION_USER_PROMPT_TEMPLATE ="""
+#         **Generate up to {max_alternative_questions} alternative user queries** to help retrieve relevant data from a vector database:
+#         - **If the user’s question references multiple entities**, ensure:
+#         - **The first two queries** mention **all** entities together (e.g., “Marie Curie” and “Albert Einstein”).  
+#         - **Subsequent queries** include at least **one separate question for each entity**, to gather additional perspectives (e.g., “How many Nobel Prizes did Marie Curie win?” and “How many Nobel Prizes did Albert Einstein win?”).
+#         - If the user’s question includes specific dates or times, reflect them in the queries.
+#         - Always use the same language the user employed.
+
+#         Current date: {current_date}\n
+#         Current Day of the week (be careful about it especially when asked about "tomorrow", "yesterday", etc.): {current_day_of_a_week}\n
+#         # Original User Query:
+#         "{original_user_query}"
+# """
+MULTI_QUERY_GENERATION_SYSTEM_PROMPT="""You are an expert AI assistant specialized in query understanding and reformulation.
+Your primary task is to generate alternative queries based on a user's original query.
+The purpose of these alternative queries is to improve the chances of finding diverse and relevant information when searching a vector database.
+**Crucially, DO NOT include the Original User Query itself in the list of `alternative_queries` you generate.**
+Focus on semantic alternatives and ensure each generated query offers a unique angle or phrasing.
+Maintain the original language used by the user in all generated alternative queries.
+
+**Core Query Generation Strategy for Multiple Entities/Concepts (VERY IMPORTANT):**
+If a user's query explicitly mentions or compares multiple distinct entities, topics, or concepts (e.g., "apples vs oranges", "impact of AI and blockchain on finance"):
+1.  You may first generate one or two rephrased queries that keep all entities/concepts together, exploring the combined intent (e.g., for "apples vs oranges," an alternative could be "comparison of apples and oranges nutritive value").
+2.  **ESSENTIALLY, and as a priority, you MUST then generate separate, specific queries focusing on EACH distinct entity/concept INDIVIDUALLY.** This is critical for comprehensive retrieval and is a primary requirement.
+    *   **Example 1 (Comparison):**
+        *   Original: "What is better, apples or oranges for health?"
+        *   Required Individual Entity Alternatives:
+            *   "Health benefits of apples"
+            *   "Nutritional advantages of oranges"
+    *   **Example 2 (Combination/Interaction):**
+        *   Original: "How do Marie Curie and Albert Einstein's discoveries relate?"
+        *   Required Individual Entity Alternatives:
+            *   "Key scientific discoveries of Marie Curie"
+            *   "Albert Einstein's major contributions to physics"
+    *   **Example 3 (Multiple Topics):**
+        *   Original: "Learning Python for data analysis and web development"
+        *   Required Individual Entity Alternatives:
+            *   "Using Python for data analysis tasks"
+            *   "Python frameworks for web development"
+
+If the query focuses on a single entity/concept, generate varied phrasings, explore its sub-topics, or different perspectives.
+"""
+MULTI_QUERY_GENERATION_USER_PROMPT_TEMPLATE ="""Based on the "Original User Query" below, generate up to {max_alternative_questions} diverse alternative user queries, adhering to the core strategies outlined.
+
+Remember the critical instruction: if the Original User Query involves multiple entities/concepts, you must prioritize generating separate queries for each individual entity/concept after potentially generating 1-2 combined queries (if the limit of {max_alternative_questions} allows for both types).
 
 Guidelines:
-- **If the user’s original query references multiple distinct entities or concepts**, ensure that:
-    - At least one, and ideally the first one or two, alternative queries rephrase the original query to capture the combined intent, possibly using synonyms or different sentence structures.
-    - Subsequent alternative queries can break down the original query by focusing on individual entities/concepts or different aspects/perspectives of the original query. For example, if the original query is "Compare the performance of Dell XPS 13 and MacBook Air M3 for students", alternatives could be "Student experiences with Dell XPS 13" and "MacBook Air M3 suitability for college work".
-- **If the user’s original query includes specific dates, times, or numerical values**, try to incorporate these accurately into relevant alternative queries or generate queries that explore related timeframes or values if appropriate.
-- **Maintain the original language** used by the user in all generated alternative queries.
-- **Focus on semantic alternatives**: Think about different ways someone might ask for the same or related information.
-- **Generate distinct queries**: Each alternative query should offer a unique angle or phrasing.
-- **Do NOT include the original query itself in the list of `alternative_queries` you generate.**
+1.  **Dates and Times:**
+    *   If the Original User Query includes specific dates or times, accurately reflect these in relevant alternative queries. Use the provided current date/day for context if needed.
+2.  **Language Consistency:**
+    *   Always use the same language as the user in the Original User Query.
+
+Current date (for context): {current_date}
+Current Day of the week (for context, e.g., for "tomorrow", "yesterday"): {current_day_of_a_week}
 
 Original User Query:
 "{original_user_query}"
 
-Current date (for context, if relevant to the query): {current_date}
-Current day of the week (for context, if relevant, e.g., for "tomorrow", "yesterday"): {current_day_of_a_week}
-
-Generate the alternative queries.
+Generate the alternative queries now:
 """
+
+
 
 # --- Prompt Templates for Product-Entity Matching (Promotion) ---
 PRODUCT_ENTITY_MATCH_SYSTEM_PROMPT = """

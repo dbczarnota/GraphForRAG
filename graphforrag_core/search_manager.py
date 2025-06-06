@@ -41,689 +41,658 @@ class SearchManager:
         query_text: str, 
         config: ChunkSearchConfig, 
         query_embedding: Optional[List[float]]
-    ) -> List[Dict[str, Any]]:
-        cypher_parts = []
-        params: Dict[str, Any] = {}
-        keyword_part_included = False
-        semantic_part_included = False
+    # ) -> List[Dict[str, Any]]: # Old
+    ) -> Dict[str, List[Dict[str, Any]]]: # New return type
+        # --- Start of modification ---
+        # cypher_parts = [] # Old: Not needed for separate queries
+        # params: Dict[str, Any] = {} # Old: Params will be per query
+        # keyword_part_included = False # Old
+        # semantic_part_included = False # Old
+        results_by_method: Dict[str, List[Dict[str, Any]]] = {}
+
 
         if ChunkSearchMethod.KEYWORD in config.search_methods and query_text.strip():
             lucene_query_str = construct_lucene_query(query_text)
-            if lucene_query_str: 
-                params["keyword_query_string_chunk"] = lucene_query_str
-                params["keyword_limit_param_chunk"] = config.keyword_fetch_limit
-                params["index_name_keyword_chunk"] = "chunk_content_ft"
-                cypher_parts.append(cypher_queries.CHUNK_SEARCH_KEYWORD_PART)
-                keyword_part_included = True
+            if lucene_query_str:
+                keyword_params = {
+                    "keyword_query_string_chunk": lucene_query_str,
+                    "keyword_limit_param_chunk": config.keyword_fetch_limit,
+                    "index_name_keyword_chunk": "chunk_content_ft"
+                }
+                # cypher_parts.append(cypher_queries.CHUNK_SEARCH_KEYWORD_PART) # Old
+                # keyword_part_included = True # Old
+                try:
+                    logger.debug(f"_fetch_chunks_combined (Keyword): Executing. Query:\n{cypher_queries.CHUNK_SEARCH_KEYWORD_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in keyword_params.items()} }")
+                    fetch_start_time_kw = time.perf_counter()
+                    keyword_db_results, _, _ = await self.driver.execute_query(
+                        cypher_queries.CHUNK_SEARCH_KEYWORD_PART, keyword_params, database_=self.database
+                    )
+                    fetch_duration_kw = (time.perf_counter() - fetch_start_time_kw) * 1000
+                    logger.debug(f"_fetch_chunks_combined (Keyword): DB query took {fetch_duration_kw:.2f} ms. Rows: {len(keyword_db_results)}")
+                    results_by_method["keyword"] = [dict(record) for record in keyword_db_results]
+                except Exception as e_kw:
+                    logger.error(f"Error during _fetch_chunks_combined (Keyword): {e_kw}", exc_info=True)
+                    results_by_method["keyword"] = [] # Ensure key exists even on error for consistency downstream if needed
             else:
-                logger.debug("_fetch_chunks_combined: Keyword part skipped due to empty Lucene query.")
+                logger.debug("_fetch_chunks_combined (Keyword): Skipped due to empty Lucene query.")
+                results_by_method["keyword"] = []
+
 
         if ChunkSearchMethod.SEMANTIC in config.search_methods and query_embedding:
-            params["semantic_embedding_vector_param_chunk"] = query_embedding
-            params["semantic_top_k_param_chunk"] = config.semantic_fetch_limit
-            params["semantic_min_similarity_score_param_chunk"] = config.min_similarity_score
-            params["index_name_semantic_chunk"] = "chunk_content_embedding_vector"
-            cypher_parts.append(cypher_queries.CHUNK_SEARCH_SEMANTIC_PART)
-            semantic_part_included = True
+            semantic_params = {
+                "semantic_embedding_vector_param_chunk": query_embedding,
+                "semantic_top_k_param_chunk": config.semantic_fetch_limit,
+                "semantic_min_similarity_score_param_chunk": config.min_similarity_score,
+                "index_name_semantic_chunk": "chunk_content_embedding_vector"
+            }
+            # cypher_parts.append(cypher_queries.CHUNK_SEARCH_SEMANTIC_PART) # Old
+            # semantic_part_included = True # Old
+            try:
+                logger.debug(f"_fetch_chunks_combined (Semantic): Executing. Query:\n{cypher_queries.CHUNK_SEARCH_SEMANTIC_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in semantic_params.items()} }")
+                fetch_start_time_sem = time.perf_counter()
+                semantic_db_results, _, _ = await self.driver.execute_query(
+                    cypher_queries.CHUNK_SEARCH_SEMANTIC_PART, semantic_params, database_=self.database
+                )
+                fetch_duration_sem = (time.perf_counter() - fetch_start_time_sem) * 1000
+                logger.debug(f"_fetch_chunks_combined (Semantic): DB query took {fetch_duration_sem:.2f} ms. Rows: {len(semantic_db_results)}")
+                results_by_method["semantic"] = [dict(record) for record in semantic_db_results]
+            except Exception as e_sem:
+                logger.error(f"Error during _fetch_chunks_combined (Semantic): {e_sem}", exc_info=True)
+                results_by_method["semantic"] = []
         else:
-            logger.debug("_fetch_chunks_combined: Semantic part skipped (no embedding or not in config).")
+            logger.debug("_fetch_chunks_combined (Semantic): Skipped (no embedding or not in config).")
+            if ChunkSearchMethod.SEMANTIC in config.search_methods: # Add empty list if method was configured but skipped
+                 results_by_method["semantic"] = []
         
-        if not cypher_parts:
-            logger.info("_fetch_chunks_combined: No search parts to execute.")
-            return []
+        # if not cypher_parts: # Old
+        #     logger.info("_fetch_chunks_combined: No search parts to execute.")
+        #     return []
 
-        final_query = " UNION ALL ".join(cypher_parts)
+        # final_query = " UNION ALL ".join(cypher_parts) # Old
         
-        try:
-            param_keys_for_log = {k: (type(v).__name__ if not isinstance(v, list) else f"list_len_{len(v)}") for k,v in params.items()}
-            logger.debug(f"_fetch_chunks_combined: Executing with {len(cypher_parts)} part(s) (K: {keyword_part_included}, S: {semantic_part_included}). Query:\n{final_query}\nParams (keys and types/lengths): {param_keys_for_log}")
+        # try: # Old
+            # param_keys_for_log = {k: (type(v).__name__ if not isinstance(v, list) else f"list_len_{len(v)}") for k,v in params.items()}
+            # logger.debug(f"_fetch_chunks_combined: Executing with {len(cypher_parts)} part(s) (K: {keyword_part_included}, S: {semantic_part_included}). Query:\n{final_query}\nParams (keys and types/lengths): {param_keys_for_log}")
             
-            fetch_start_time = time.perf_counter()
-            results, summary, _ = await self.driver.execute_query(final_query, params, database_=self.database)
-            fetch_duration = (time.perf_counter() - fetch_start_time) * 1000
-            num_rows_returned = len(results)
-            logger.debug(f"_fetch_chunks_combined: DB query took {fetch_duration:.2f} ms. Rows returned: {num_rows_returned}")
+            # fetch_start_time = time.perf_counter()
+            # results, summary, _ = await self.driver.execute_query(final_query, params, database_=self.database)
+            # fetch_duration = (time.perf_counter() - fetch_start_time) * 1000
+            # num_rows_returned = len(results)
+            # logger.debug(f"_fetch_chunks_combined: DB query took {fetch_duration:.2f} ms. Rows returned: {num_rows_returned}")
             
-            return [dict(record) for record in results]
-        except Exception as e:
-            logger.error(f"Error during _fetch_chunks_combined: {e}", exc_info=True)
-            return []
+            # return [dict(record) for record in results] # Old
+        # except Exception as e: # Old
+            # logger.error(f"Error during _fetch_chunks_combined: {e}", exc_info=True)
+            # return [] # Old
+        
+        logger.debug(f"_fetch_chunks_combined: Returning results by method: { {k: len(v) for k,v in results_by_method.items()} }")
+        return results_by_method
+
 
     async def _fetch_entities_combined(
         self,
         query_text: str,
         config: EntitySearchConfig,
         query_embedding: Optional[List[float]]
-    ) -> List[Dict[str, Any]]:
-        cypher_parts = []
-        params: Dict[str, Any] = {}
-        keyword_part_included = False
-        semantic_name_part_included = False
-        # semantic_desc_part_included = False # This method is removed
+    # ) -> List[Dict[str, Any]]: # Old
+    ) -> Dict[str, List[Dict[str, Any]]]: # New return type
+        # --- Start of modification ---
+        results_by_method: Dict[str, List[Dict[str, Any]]] = {}
 
-        if EntitySearchMethod.KEYWORD_NAME in config.search_methods and query_text.strip(): # Changed from KEYWORD_NAME_DESC
+        if EntitySearchMethod.KEYWORD_NAME in config.search_methods and query_text.strip():
             lucene_query_str = construct_lucene_query(query_text)
             if lucene_query_str:
-                params["keyword_query_string_entity"] = lucene_query_str
-                params["keyword_limit_param_entity"] = config.keyword_fetch_limit
-                params["index_name_keyword_entity"] = "entity_name_ft" # Uses the new index for name only
-                cypher_parts.append(cypher_queries.ENTITY_SEARCH_KEYWORD_PART)
-                keyword_part_included = True
+                keyword_params = {
+                    "keyword_query_string_entity": lucene_query_str,
+                    "keyword_limit_param_entity": config.keyword_fetch_limit,
+                    "index_name_keyword_entity": "entity_name_ft"
+                }
+                try:
+                    logger.debug(f"_fetch_entities_combined (KeywordName): Executing. Query:\n{cypher_queries.ENTITY_SEARCH_KEYWORD_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in keyword_params.items()} }")
+                    fetch_start_time_kw = time.perf_counter()
+                    keyword_db_results, _, _ = await self.driver.execute_query(
+                        cypher_queries.ENTITY_SEARCH_KEYWORD_PART, keyword_params, database_=self.database
+                    )
+                    fetch_duration_kw = (time.perf_counter() - fetch_start_time_kw) * 1000
+                    logger.debug(f"_fetch_entities_combined (KeywordName): DB query took {fetch_duration_kw:.2f} ms. Rows: {len(keyword_db_results)}")
+                    # The key here should match the method_source in the Cypher query
+                    results_by_method["keyword_name"] = [dict(record) for record in keyword_db_results]
+                except Exception as e_kw:
+                    logger.error(f"Error during _fetch_entities_combined (KeywordName): {e_kw}", exc_info=True)
+                    results_by_method["keyword_name"] = []
             else:
-                logger.debug("_fetch_entities_combined: Keyword part skipped due to empty Lucene query.")
+                logger.debug("_fetch_entities_combined (KeywordName): Skipped due to empty Lucene query.")
+                results_by_method["keyword_name"] = []
 
         if EntitySearchMethod.SEMANTIC_NAME in config.search_methods and query_embedding:
-            params["semantic_embedding_entity_name"] = query_embedding
-            params["semantic_limit_entity_name"] = config.semantic_name_fetch_limit
-            params["semantic_min_score_entity_name"] = config.min_similarity_score_name
-            params["index_name_semantic_entity_name"] = "entity_name_embedding_vector"
-            cypher_parts.append(cypher_queries.ENTITY_SEARCH_SEMANTIC_NAME_PART)
-            semantic_name_part_included = True
+            semantic_name_params = {
+                "semantic_embedding_entity_name": query_embedding,
+                "semantic_limit_entity_name": config.semantic_name_fetch_limit,
+                "semantic_min_score_entity_name": config.min_similarity_score_name,
+                "index_name_semantic_entity_name": "entity_name_embedding_vector"
+            }
+            try:
+                logger.debug(f"_fetch_entities_combined (SemanticName): Executing. Query:\n{cypher_queries.ENTITY_SEARCH_SEMANTIC_NAME_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in semantic_name_params.items()} }")
+                fetch_start_time_sem_name = time.perf_counter()
+                semantic_name_db_results, _, _ = await self.driver.execute_query(
+                    cypher_queries.ENTITY_SEARCH_SEMANTIC_NAME_PART, semantic_name_params, database_=self.database
+                )
+                fetch_duration_sem_name = (time.perf_counter() - fetch_start_time_sem_name) * 1000
+                logger.debug(f"_fetch_entities_combined (SemanticName): DB query took {fetch_duration_sem_name:.2f} ms. Rows: {len(semantic_name_db_results)}")
+                results_by_method["semantic_name"] = [dict(record) for record in semantic_name_db_results]
+            except Exception as e_sem_name:
+                logger.error(f"Error during _fetch_entities_combined (SemanticName): {e_sem_name}", exc_info=True)
+                results_by_method["semantic_name"] = []
         else:
-            logger.debug("_fetch_entities_combined: Semantic Name part skipped.")
-
-        # SEMANTIC_DESCRIPTION part is removed as entities no longer have content/description field for this.
+            logger.debug("_fetch_entities_combined (SemanticName): Skipped (no embedding or not in config).")
+            if EntitySearchMethod.SEMANTIC_NAME in config.search_methods:
+                 results_by_method["semantic_name"] = []
             
-        if not cypher_parts:
-            logger.info("_fetch_entities_combined: No search parts to execute.")
-            return []
 
-        final_query = " UNION ALL ".join(cypher_parts)
-        try:
-            param_keys_for_log = {k: (type(v).__name__ if not isinstance(v, list) else f"list_len_{len(v)}") for k,v in params.items()}
-            logger.debug(f"_fetch_entities_combined: Executing with {len(cypher_parts)} part(s) (K: {keyword_part_included}, SN: {semantic_name_part_included}). Query:\n{final_query}\nParams (keys and types/lengths): {param_keys_for_log}") # Removed SD from log
-            fetch_start_time = time.perf_counter()
-            results, summary, _ = await self.driver.execute_query(final_query, params, database_=self.database)
-            fetch_duration = (time.perf_counter() - fetch_start_time) * 1000
-            num_rows_returned = len(results)
-            logger.debug(f"_fetch_entities_combined: DB query took {fetch_duration:.2f} ms. Rows returned: {num_rows_returned}")
-            return [dict(record) for record in results]
-        except Exception as e:
-            logger.error(f"Error during _fetch_entities_combined: {e}", exc_info=True); return []
+        logger.debug(f"_fetch_entities_combined: Returning results by method: { {k: len(v) for k,v in results_by_method.items()} }")
+        return results_by_method
     
     async def _fetch_relationships_combined(
         self,
         query_text: str,
         config: RelationshipSearchConfig,
         query_embedding: Optional[List[float]]
-    ) -> List[Dict[str, Any]]:
-        cypher_parts = []
-        params: Dict[str, Any] = {}
-        keyword_part_included = False
-        semantic_part_included = False
+    # ) -> List[Dict[str, Any]]: # Old
+    ) -> Dict[str, List[Dict[str, Any]]]: # New return type
+        # --- Start of modification ---
+        results_by_method: Dict[str, List[Dict[str, Any]]] = {}
 
         if RelationshipSearchMethod.KEYWORD_FACT in config.search_methods and query_text.strip():
             lucene_query_str = construct_lucene_query(query_text)
             if lucene_query_str:
-                params["keyword_query_string_rel"] = lucene_query_str
-                params["keyword_limit_param_rel"] = config.keyword_fetch_limit
-                params["index_name_keyword_rel"] = "relationship_fact_ft"
-                cypher_parts.append(cypher_queries.RELATIONSHIP_SEARCH_KEYWORD_PART)
-                keyword_part_included = True
+                keyword_params = {
+                    "keyword_query_string_rel": lucene_query_str,
+                    "keyword_limit_param_rel": config.keyword_fetch_limit,
+                    "index_name_keyword_rel": "relationship_fact_ft"
+                }
+                try:
+                    logger.debug(f"_fetch_relationships_combined (KeywordFact): Executing. Query:\n{cypher_queries.RELATIONSHIP_SEARCH_KEYWORD_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in keyword_params.items()} }")
+                    fetch_start_time_kw = time.perf_counter()
+                    keyword_db_results, _, _ = await self.driver.execute_query(
+                        cypher_queries.RELATIONSHIP_SEARCH_KEYWORD_PART, keyword_params, database_=self.database
+                    )
+                    fetch_duration_kw = (time.perf_counter() - fetch_start_time_kw) * 1000
+                    logger.debug(f"_fetch_relationships_combined (KeywordFact): DB query took {fetch_duration_kw:.2f} ms. Rows: {len(keyword_db_results)}")
+                    results_by_method["keyword_fact"] = [dict(record) for record in keyword_db_results]
+                except Exception as e_kw:
+                    logger.error(f"Error during _fetch_relationships_combined (KeywordFact): {e_kw}", exc_info=True)
+                    results_by_method["keyword_fact"] = []
             else:
-                logger.debug("_fetch_relationships_combined: Keyword part skipped due to empty Lucene query.")
+                logger.debug("_fetch_relationships_combined (KeywordFact): Skipped due to empty Lucene query.")
+                results_by_method["keyword_fact"] = []
 
         if RelationshipSearchMethod.SEMANTIC_FACT in config.search_methods and query_embedding:
-            params["semantic_embedding_rel_fact"] = query_embedding
-            params["semantic_limit_rel_fact"] = config.semantic_fetch_limit
-            params["semantic_min_score_rel_fact"] = config.min_similarity_score
-            params["index_name_semantic_rel_fact"] = "relates_to_fact_embedding_vector"
-            cypher_parts.append(cypher_queries.RELATIONSHIP_SEARCH_SEMANTIC_PART)
-            semantic_part_included = True
+            semantic_params = {
+                "semantic_embedding_rel_fact": query_embedding,
+                "semantic_limit_rel_fact": config.semantic_fetch_limit,
+                "semantic_min_score_rel_fact": config.min_similarity_score,
+                "index_name_semantic_rel_fact": "relates_to_fact_embedding_vector"
+            }
+            try:
+                logger.debug(f"_fetch_relationships_combined (SemanticFact): Executing. Query:\n{cypher_queries.RELATIONSHIP_SEARCH_SEMANTIC_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in semantic_params.items()} }")
+                fetch_start_time_sem = time.perf_counter()
+                semantic_db_results, _, _ = await self.driver.execute_query(
+                    cypher_queries.RELATIONSHIP_SEARCH_SEMANTIC_PART, semantic_params, database_=self.database
+                )
+                fetch_duration_sem = (time.perf_counter() - fetch_start_time_sem) * 1000
+                logger.debug(f"_fetch_relationships_combined (SemanticFact): DB query took {fetch_duration_sem:.2f} ms. Rows: {len(semantic_db_results)}")
+                results_by_method["semantic_fact"] = [dict(record) for record in semantic_db_results]
+            except Exception as e_sem:
+                logger.error(f"Error during _fetch_relationships_combined (SemanticFact): {e_sem}", exc_info=True)
+                results_by_method["semantic_fact"] = []
         else:
-            logger.debug("_fetch_relationships_combined: Semantic part skipped.")
+            logger.debug("_fetch_relationships_combined (SemanticFact): Skipped (no embedding or not in config).")
+            if RelationshipSearchMethod.SEMANTIC_FACT in config.search_methods:
+                 results_by_method["semantic_fact"] = []
             
-        if not cypher_parts: 
-            logger.info("_fetch_relationships_combined: No search parts to execute.")
-            return []
-            
-        final_query = " UNION ALL ".join(cypher_parts)
-        try:
-            param_keys_for_log = {k: (type(v).__name__ if not isinstance(v, list) else f"list_len_{len(v)}") for k,v in params.items()}
-            logger.debug(f"_fetch_relationships_combined: Executing with {len(cypher_parts)} part(s) (K: {keyword_part_included}, S: {semantic_part_included}). Query:\n{final_query}\nParams (keys and types/lengths): {param_keys_for_log}")
-            fetch_start_time = time.perf_counter()
-            results, summary, _ = await self.driver.execute_query(final_query, params, database_=self.database)
-            fetch_duration = (time.perf_counter() - fetch_start_time) * 1000
-            num_rows_returned = len(results)
-            logger.debug(f"_fetch_relationships_combined: DB query took {fetch_duration:.2f} ms. Rows returned: {num_rows_returned}")
-            return [dict(record) for record in results]
-        except Exception as e:
-            logger.error(f"Error during _fetch_relationships_combined: {e}", exc_info=True); return []
+        logger.debug(f"_fetch_relationships_combined: Returning results by method: { {k: len(v) for k,v in results_by_method.items()} }")
+        return results_by_method
 
     async def _fetch_sources_combined(
         self,
         query_text: str,
         config: SourceSearchConfig,
         query_embedding: Optional[List[float]]
-    ) -> List[Dict[str, Any]]:
-        cypher_parts = []
-        params: Dict[str, Any] = {}
-        keyword_part_included = False
-        semantic_part_included = False
+    # ) -> List[Dict[str, Any]]: # Old
+    ) -> Dict[str, List[Dict[str, Any]]]: # New return type
+        # --- Start of modification ---
+        results_by_method: Dict[str, List[Dict[str, Any]]] = {}
 
         if SourceSearchMethod.KEYWORD_CONTENT in config.search_methods and query_text.strip():
             lucene_query_str = construct_lucene_query(query_text)
             if lucene_query_str:
-                params["keyword_query_string_source"] = lucene_query_str
-                params["keyword_limit_param_source"] = config.keyword_fetch_limit
-                params["index_name_keyword_source"] = "source_content_ft"
-                cypher_parts.append(cypher_queries.SOURCE_SEARCH_KEYWORD_PART)
-                keyword_part_included = True
+                keyword_params = {
+                    "keyword_query_string_source": lucene_query_str,
+                    "keyword_limit_param_source": config.keyword_fetch_limit,
+                    "index_name_keyword_source": "source_content_ft"
+                }
+                try:
+                    logger.debug(f"_fetch_sources_combined (KeywordContent): Executing. Query:\n{cypher_queries.SOURCE_SEARCH_KEYWORD_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in keyword_params.items()} }")
+                    fetch_start_time_kw = time.perf_counter()
+                    keyword_db_results, _, _ = await self.driver.execute_query(
+                        cypher_queries.SOURCE_SEARCH_KEYWORD_PART, keyword_params, database_=self.database
+                    )
+                    fetch_duration_kw = (time.perf_counter() - fetch_start_time_kw) * 1000
+                    logger.debug(f"_fetch_sources_combined (KeywordContent): DB query took {fetch_duration_kw:.2f} ms. Rows: {len(keyword_db_results)}")
+                    results_by_method["keyword_content"] = [dict(record) for record in keyword_db_results]
+                except Exception as e_kw:
+                    logger.error(f"Error during _fetch_sources_combined (KeywordContent): {e_kw}", exc_info=True)
+                    results_by_method["keyword_content"] = []
             else:
-                logger.debug("_fetch_sources_combined: Keyword part skipped due to empty Lucene query.")
+                logger.debug("_fetch_sources_combined (KeywordContent): Skipped due to empty Lucene query.")
+                results_by_method["keyword_content"] = []
         
         if SourceSearchMethod.SEMANTIC_CONTENT in config.search_methods and query_embedding:
-            params["semantic_embedding_source_content"] = query_embedding
-            params["semantic_limit_source_content"] = config.semantic_fetch_limit
-            params["semantic_min_score_source_content"] = config.min_similarity_score
-            params["index_name_semantic_source_content"] = "source_content_embedding_vector"
-            cypher_parts.append(cypher_queries.SOURCE_SEARCH_SEMANTIC_PART)
-            semantic_part_included = True
+            semantic_params = {
+                "semantic_embedding_source_content": query_embedding,
+                "semantic_limit_source_content": config.semantic_fetch_limit,
+                "semantic_min_score_source_content": config.min_similarity_score,
+                "index_name_semantic_source_content": "source_content_embedding_vector"
+            }
+            try:
+                logger.debug(f"_fetch_sources_combined (SemanticContent): Executing. Query:\n{cypher_queries.SOURCE_SEARCH_SEMANTIC_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in semantic_params.items()} }")
+                fetch_start_time_sem = time.perf_counter()
+                semantic_db_results, _, _ = await self.driver.execute_query(
+                    cypher_queries.SOURCE_SEARCH_SEMANTIC_PART, semantic_params, database_=self.database
+                )
+                fetch_duration_sem = (time.perf_counter() - fetch_start_time_sem) * 1000
+                logger.debug(f"_fetch_sources_combined (SemanticContent): DB query took {fetch_duration_sem:.2f} ms. Rows: {len(semantic_db_results)}")
+                results_by_method["semantic_content"] = [dict(record) for record in semantic_db_results]
+            except Exception as e_sem:
+                logger.error(f"Error during _fetch_sources_combined (SemanticContent): {e_sem}", exc_info=True)
+                results_by_method["semantic_content"] = []
         else:
-            logger.debug("_fetch_sources_combined: Semantic part skipped.")
-            
-        if not cypher_parts: 
-            logger.info("_fetch_sources_combined: No search parts to execute.")
-            return []
-            
-        final_query = " UNION ALL ".join(cypher_parts)
-        try:
-            param_keys_for_log = {k: (type(v).__name__ if not isinstance(v, list) else f"list_len_{len(v)}") for k,v in params.items()}
-            logger.debug(f"_fetch_sources_combined: Executing with {len(cypher_parts)} part(s) (K: {keyword_part_included}, S: {semantic_part_included}). Query:\n{final_query}\nParams (keys and types/lengths): {param_keys_for_log}")
-            fetch_start_time = time.perf_counter()
-            results, summary, _ = await self.driver.execute_query(final_query, params, database_=self.database)
-            fetch_duration = (time.perf_counter() - fetch_start_time) * 1000
-            num_rows_returned = len(results)
-            logger.debug(f"_fetch_sources_combined: DB query took {fetch_duration:.2f} ms. Rows returned: {num_rows_returned}")
-            return [dict(record) for record in results]
-        except Exception as e:
-            logger.error(f"Error during _fetch_sources_combined: {e}", exc_info=True); return []
+            logger.debug("_fetch_sources_combined (SemanticContent): Skipped (no embedding or not in config).")
+            if SourceSearchMethod.SEMANTIC_CONTENT in config.search_methods:
+                 results_by_method["semantic_content"] = []
+
+        logger.debug(f"_fetch_sources_combined: Returning results by method: { {k: len(v) for k,v in results_by_method.items()} }")
+        return results_by_method
 
 
     async def _fetch_mentions_combined(
         self,
         query_text: str,
-        config: MentionSearchConfig, # Uses the new MentionSearchConfig
+        config: MentionSearchConfig, 
         query_embedding: Optional[List[float]]
-    ) -> List[Dict[str, Any]]:
-        cypher_parts = []
-        params: Dict[str, Any] = {}
-        keyword_part_included = False
-        semantic_part_included = False
+    # ) -> List[Dict[str, Any]]: # Old
+    ) -> Dict[str, List[Dict[str, Any]]]: # New return type
+        # --- Start of modification ---
+        results_by_method: Dict[str, List[Dict[str, Any]]] = {}
+        # keyword_part_included = False # Old
+        # semantic_part_included = False # Old
 
         if MentionSearchMethod.KEYWORD_FACT in config.search_methods and query_text.strip():
             lucene_query_str = construct_lucene_query(query_text)
             if lucene_query_str:
-                params["keyword_query_string_mention_fact"] = lucene_query_str
-                params["keyword_limit_param_mention_fact"] = config.keyword_fetch_limit
-                # This index should already be created by SchemaManager for MENTIONS.fact_sentence
-                params["index_name_keyword_mention_fact"] = "mentions_fact_sentence_ft" 
-                cypher_parts.append(cypher_queries.MENTION_SEARCH_KEYWORD_PART)
-                keyword_part_included = True
+                keyword_params = {
+                    "keyword_query_string_mention_fact": lucene_query_str,
+                    "keyword_limit_param_mention_fact": config.keyword_fetch_limit,
+                    "index_name_keyword_mention_fact": "mentions_fact_sentence_ft"
+                }
+                try:
+                    logger.debug(f"_fetch_mentions_combined (KeywordFact): Executing. Query:\n{cypher_queries.MENTION_SEARCH_KEYWORD_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in keyword_params.items()} }")
+                    fetch_start_time_kw = time.perf_counter()
+                    keyword_db_results, _, _ = await self.driver.execute_query(
+                        cypher_queries.MENTION_SEARCH_KEYWORD_PART, keyword_params, database_=self.database
+                    )
+                    fetch_duration_kw = (time.perf_counter() - fetch_start_time_kw) * 1000
+                    logger.debug(f"_fetch_mentions_combined (KeywordFact): DB query took {fetch_duration_kw:.2f} ms. Rows: {len(keyword_db_results)}")
+                    results_by_method["keyword_fact"] = [dict(record) for record in keyword_db_results]
+                except Exception as e_kw:
+                    logger.error(f"Error during _fetch_mentions_combined (KeywordFact): {e_kw}", exc_info=True)
+                    results_by_method["keyword_fact"] = []
             else:
-                logger.debug("_fetch_mentions_combined: Keyword part skipped due to empty Lucene query.")
+                logger.debug("_fetch_mentions_combined (KeywordFact): Skipped due to empty Lucene query.")
+                results_by_method["keyword_fact"] = []
+
 
         if MentionSearchMethod.SEMANTIC_FACT in config.search_methods and query_embedding:
-            params["semantic_embedding_mention_fact"] = query_embedding
-            params["semantic_limit_mention_fact"] = config.semantic_fetch_limit
-            params["semantic_min_score_mention_fact"] = config.min_similarity_score
-            # This index should already be created by SchemaManager for MENTIONS.fact_embedding
-            params["index_name_semantic_mention_fact"] = "mentions_fact_embedding_vector" 
-            cypher_parts.append(cypher_queries.MENTION_SEARCH_SEMANTIC_PART)
-            semantic_part_included = True
+            semantic_params = {
+                "semantic_embedding_mention_fact": query_embedding,
+                "semantic_limit_mention_fact": config.semantic_fetch_limit,
+                "semantic_min_score_mention_fact": config.min_similarity_score,
+                "index_name_semantic_mention_fact": "mentions_fact_embedding_vector"
+            }
+            try:
+                logger.debug(f"_fetch_mentions_combined (SemanticFact): Executing. Query:\n{cypher_queries.MENTION_SEARCH_SEMANTIC_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in semantic_params.items()} }")
+                fetch_start_time_sem = time.perf_counter()
+                semantic_db_results, _, _ = await self.driver.execute_query(
+                    cypher_queries.MENTION_SEARCH_SEMANTIC_PART, semantic_params, database_=self.database
+                )
+                fetch_duration_sem = (time.perf_counter() - fetch_start_time_sem) * 1000
+                logger.debug(f"_fetch_mentions_combined (SemanticFact): DB query took {fetch_duration_sem:.2f} ms. Rows: {len(semantic_db_results)}")
+                results_by_method["semantic_fact"] = [dict(record) for record in semantic_db_results]
+            except Exception as e_sem:
+                logger.error(f"Error during _fetch_mentions_combined (SemanticFact): {e_sem}", exc_info=True)
+                results_by_method["semantic_fact"] = []
         else:
-            logger.debug("_fetch_mentions_combined: Semantic part skipped (no embedding or not in config).")
-            
-        if not cypher_parts: 
-            logger.info("_fetch_mentions_combined: No search parts to execute.")
-            return []
-            
-        final_query = " UNION ALL ".join(cypher_parts)
-        try:
-            param_keys_for_log = {k: (type(v).__name__ if not isinstance(v, list) else f"list_len_{len(v)}") for k,v in params.items()}
-            logger.debug(f"_fetch_mentions_combined: Executing with {len(cypher_parts)} part(s) (K: {keyword_part_included}, S: {semantic_part_included}). Query:\n{final_query}\nParams (keys and types/lengths): {param_keys_for_log}")
-            
-            fetch_start_time = time.perf_counter()
-            results, summary, _ = await self.driver.execute_query(final_query, params, database_=self.database)
-            fetch_duration = (time.perf_counter() - fetch_start_time) * 1000
-            num_rows_returned = len(results)
-            logger.debug(f"_fetch_mentions_combined: DB query took {fetch_duration:.2f} ms. Rows returned: {num_rows_returned}")
-            
-            return [dict(record) for record in results]
-        except Exception as e:
-            logger.error(f"Error during _fetch_mentions_combined: {e}", exc_info=True)
-            return []
+            logger.debug("_fetch_mentions_combined (SemanticFact): Skipped (no embedding or not in config).")
+            if MentionSearchMethod.SEMANTIC_FACT in config.search_methods:
+                 results_by_method["semantic_fact"] = []
+
+
+        logger.debug(f"_fetch_mentions_combined: Returning results by method: { {k: len(v) for k,v in results_by_method.items()} }")
+        return results_by_method
         
                     
     def _apply_rrf(self, results_lists: List[List[Dict[str, Any]]], k_val: int, final_limit: int, result_type: str) -> List[SearchResultItem]:
-        if not results_lists: return []
+        # --- Start of modification ---
+        if not results_lists:
+            logger.debug(f"_apply_rrf ({result_type}): Received empty results_lists. Returning empty list.")
+            return []
+
         rrf_scores: Dict[str, float] = defaultdict(float)
-        uuid_to_data_map: Dict[str, Dict[str, Any]] = {} 
-        for single_method_results in results_lists:
-            if not single_method_results: continue
+        # Stores the actual data (name, content, etc.) for each UUID.
+        # We'll pick the one from the highest original score or first encountered.
+        uuid_to_primary_data_map: Dict[str, Dict[str, Any]] = {}
+        # Stores detailed contributions from each method for each UUID
+        uuid_contributions: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+        logger.debug(f"_apply_rrf ({result_type}): Processing {len(results_lists)} result list(s). k_val={k_val}, final_limit={final_limit}")
+
+        for method_idx, single_method_results in enumerate(results_lists):
+            if not single_method_results:
+                logger.debug(f"_apply_rrf ({result_type}): Method list {method_idx} is empty. Skipping.")
+                continue
+            
+            current_method_source = "unknown_method"
+            if single_method_results and single_method_results[0].get("method_source"):
+                 current_method_source = single_method_results[0]["method_source"]
+            logger.debug(f"_apply_rrf ({result_type}): Processing method '{current_method_source}' (list {method_idx}) with {len(single_method_results)} items.")
+
             for rank, item in enumerate(single_method_results):
                 item_uuid = item.get("uuid")
-                if not item_uuid: continue
+                if not item_uuid:
+                    logger.warning(f"_apply_rrf ({result_type}): Item at rank {rank} in method list {method_idx} has no UUID. Skipping.")
+                    continue
+                
                 item_original_score = item.get("score", 0.0)
                 if not isinstance(item_original_score, (int, float)):
+                    logger.warning(f"_apply_rrf ({result_type}): Item UUID '{item_uuid}' has non-numeric score '{item_original_score}'. Defaulting to 0.0.")
                     item_original_score = 0.0
                 
-                rrf_scores[item_uuid] += 1.0 / (k_val + rank + 1)
+                rank_contribution = 1.0 / (k_val + rank + 1)
+                rrf_scores[item_uuid] += rank_contribution
+
+                # Store contribution details
+                uuid_contributions[item_uuid].append({
+                    "method": current_method_source,
+                    "rank": rank + 1, # 1-based rank
+                    "original_score": item_original_score,
+                    "rrf_contribution": rank_contribution
+                })
                 
-                if item_uuid not in uuid_to_data_map or \
-                   item_original_score > uuid_to_data_map[item_uuid].get("score", -1.0) or \
-                   (item_original_score == uuid_to_data_map[item_uuid].get("score", -1.0) and len(item) > len(uuid_to_data_map[item_uuid])):
-                    uuid_to_data_map[item_uuid] = item 
+                # Update primary data map (for name, content etc.)
+                # This logic keeps the data from the item with the highest original score,
+                # or if scores are equal, the one most recently processed if it has more fields.
+                if item_uuid not in uuid_to_primary_data_map or \
+                   item_original_score > uuid_to_primary_data_map[item_uuid].get("score", -1.0) or \
+                   (item_original_score == uuid_to_primary_data_map[item_uuid].get("score", -1.0) and len(item) > len(uuid_to_primary_data_map[item_uuid])):
+                    uuid_to_primary_data_map[item_uuid] = item
         
-        if not rrf_scores: return []
+        if not rrf_scores:
+            logger.debug(f"_apply_rrf ({result_type}): No RRF scores generated. Returning empty list.")
+            return []
         
         sorted_uuids = sorted(rrf_scores.keys(), key=lambda u: rrf_scores[u], reverse=True)
         
         final_results: List[SearchResultItem] = []
-        for uuid_str in sorted_uuids[:final_limit]:
-            data = uuid_to_data_map[uuid_str]
-            item_name = data.get("name")
-            item_final_score = rrf_scores[uuid_str] 
-            original_search_score = data.get("score") 
-            method_source = data.get("method_source") 
+        logger.debug(f"_apply_rrf ({result_type}): RRF scores calculated for {len(sorted_uuids)} unique UUIDs. Applying limit {final_limit}.")
+
+        for i, uuid_str in enumerate(sorted_uuids[:final_limit]):
+            primary_data = uuid_to_primary_data_map[uuid_str]
+            item_final_rrf_score = rrf_scores[uuid_str]
+            contributions = uuid_contributions[uuid_str]
+
+            logger.debug(f"  RRF Result ({result_type}) #{i+1}: UUID: {uuid_str}, Final RRF Score: {item_final_rrf_score:.6f}")
+            for contrib in contributions:
+                logger.debug(f"    - Contributed by: {contrib['method']}, Rank: {contrib['rank']}, Orig. Score: {contrib['original_score']:.4f}, RRF Part: {contrib['rrf_contribution']:.6f}")
 
             item_data_for_pydantic: Dict[str, Any] = {
                 "uuid": uuid_str,
-                "name": item_name,
-                "score": item_final_score, 
-                "result_type": result_type, 
-                "metadata": {"original_search_score": original_search_score}
+                "name": primary_data.get("name"),
+                "score": item_final_rrf_score, 
+                "result_type": result_type,
+                "metadata": {
+                    "contributing_methods": contributions 
+                }
             }
-            if method_source: 
-                item_data_for_pydantic["metadata"]["method_source"] = method_source
             
+            # Type-specific fields
             if result_type == "Chunk":
-                item_data_for_pydantic["content"] = data.get("content")
+                item_data_for_pydantic["content"] = primary_data.get("content")
                 item_data_for_pydantic["metadata"].update({
-                    "source_description": data.get("source_description"),
-                    "chunk_number": data.get("chunk_number")
+                    "source_description": primary_data.get("source_description"),
+                    "chunk_number": primary_data.get("chunk_number")
                 })
             elif result_type == "Entity":
-                # item_data_for_pydantic["description"] = data.get("description") # Entity has no description/content now
-                item_data_for_pydantic["label"] = data.get("label")
+                item_data_for_pydantic["label"] = primary_data.get("label")
             elif result_type == "Relationship":
-                item_data_for_pydantic["fact_sentence"] = data.get("fact_sentence")
-                item_data_for_pydantic["source_entity_uuid"] = data.get("source_entity_uuid")
-                item_data_for_pydantic["target_entity_uuid"] = data.get("target_entity_uuid")
+                item_data_for_pydantic["fact_sentence"] = primary_data.get("fact_sentence")
+                item_data_for_pydantic["source_node_uuid"] = primary_data.get("source_entity_uuid") # Note: key in Cypher query
+                item_data_for_pydantic["target_node_uuid"] = primary_data.get("target_entity_uuid") # Note: key in Cypher query
             elif result_type == "Source": 
-                item_data_for_pydantic["content"] = data.get("content")
-            elif result_type == "Product": # ADDED Product handling
-                item_data_for_pydantic["content"] = data.get("content") # JSON string
-                if data.get("sku") is not None:
-                    item_data_for_pydantic["metadata"]["sku"] = data.get("sku")
-                if data.get("price") is not None:
-                    item_data_for_pydantic["metadata"]["price"] = data.get("price")
-            elif result_type == "Mention": # NEWLY ADDED CASE
-                item_data_for_pydantic["fact_sentence"] = data.get("fact_sentence")
-                item_data_for_pydantic["source_node_uuid"] = data.get("source_node_uuid") # Chunk UUID
-                item_data_for_pydantic["target_node_uuid"] = data.get("target_node_uuid") # Entity/Product UUID
-                # name field in SearchResultItem will be the name of the target_node (Entity/Product)
-                # item_data_for_pydantic["name"] is already covered by `item_name = data.get("name")`
+                item_data_for_pydantic["content"] = primary_data.get("content")
+            elif result_type == "Product":
+                item_data_for_pydantic["content"] = primary_data.get("content") 
+                if primary_data.get("sku") is not None:
+                    item_data_for_pydantic["metadata"]["sku"] = primary_data.get("sku")
+                if primary_data.get("price") is not None:
+                    item_data_for_pydantic["metadata"]["price"] = primary_data.get("price")
+            elif result_type == "Mention":
+                item_data_for_pydantic["fact_sentence"] = primary_data.get("fact_sentence")
+                item_data_for_pydantic["source_node_uuid"] = primary_data.get("source_node_uuid") 
+                item_data_for_pydantic["target_node_uuid"] = primary_data.get("target_node_uuid") 
                 
-                # Determine target node type (Entity or Product) from labels for metadata
                 target_node_type_str = "Unknown"
-                target_labels = data.get("target_node_labels", [])
-                if "Product" in target_labels:
-                    target_node_type_str = "Product"
-                elif "Entity" in target_labels:
-                    target_node_type_str = "Entity"
+                target_labels = primary_data.get("target_node_labels", [])
+                if "Product" in target_labels: target_node_type_str = "Product"
+                elif "Entity" in target_labels: target_node_type_str = "Entity"
                 item_data_for_pydantic["metadata"]["target_node_type"] = target_node_type_str
 
-
             final_results.append(SearchResultItem(**item_data_for_pydantic))
+        
+        logger.debug(f"_apply_rrf ({result_type}): Final list contains {len(final_results)} items.")
         return final_results
     
     # --- Public Search Methods (Now using combined fetch internally) ---
-    async def search_mentions(self, query_text: str, config: MentionSearchConfig, query_embedding: Optional[List[float]] = None) -> List[SearchResultItem]:
+    async def search_mentions(self, query_text: str, config: MentionSearchConfig, query_embedding: Optional[List[float]] = None) -> Dict[str, List[Dict[str, Any]]]: # MODIFIED return type
         start_time = time.perf_counter()
-        logger.info(f"Searching mentions for: '{query_text}'")
+        logger.info(f"SearchManager: Fetching mention data for query: '{query_text}' (will be RRF'd later if applicable)")
         
-        combined_method_results: List[Dict[str, Any]] = await self._fetch_mentions_combined(
+        # --- Start of modification ---
+        fetched_results_by_method: Dict[str, List[Dict[str, Any]]] = await self._fetch_mentions_combined(
             query_text, config, query_embedding
         )
 
-        if not combined_method_results:
-            logger.info("No results from combined fetch for mentions.")
-            duration_empty = (time.perf_counter() - start_time) * 1000
-            logger.info(f"Mention search (empty results) completed in {duration_empty:.2f} ms.")
-            return []
+        # RRF logic and SearchResultItem creation removed.
 
-        all_method_results_for_rrf: List[List[Dict[str, Any]]] = []
-        if config.reranker == MentionRerankerMethod.RRF:
-            grouped_by_method: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-            for res in combined_method_results:
-                grouped_by_method[res.get("method_source", "unknown")].append(res)
-            all_method_results_for_rrf = list(grouped_by_method.values())
-            
-        final_items: List[SearchResultItem]
-        if config.reranker == MentionRerankerMethod.RRF and all_method_results_for_rrf:
-            # The _apply_rrf method needs to correctly populate SearchResultItem for "Mention"
-            final_items = self._apply_rrf(all_method_results_for_rrf, config.rrf_k, config.limit, "Mention")
-        elif combined_method_results:
-            logger.debug("Applying simple sort for mentions as RRF is not configured or results could not be split.")
-            combined_method_results.sort(key=lambda x: x.get('score', 0.0), reverse=True)
-            
-            final_items = []
-            for data in combined_method_results[:config.limit]:
-                # Determine target node type (Entity or Product) from labels
-                target_node_type_str = "Unknown"
-                target_labels = data.get("target_node_labels", [])
-                if "Product" in target_labels:
-                    target_node_type_str = "Product"
-                elif "Entity" in target_labels:
-                    target_node_type_str = "Entity"
-                
-                item_metadata = {
-                    "method_source": data.get("method_source", "unknown"),
-                    "target_node_type": target_node_type_str # Add type of mentioned node
-                }
-                
-                final_items.append(SearchResultItem(
-                    uuid=data["uuid"], # UUID of the MENTIONS relationship
-                    name=data.get("name"), # Name of the target node (Entity/Product)
-                    fact_sentence=data.get("fact_sentence"),
-                    source_node_uuid=data.get("source_node_uuid"), # UUID of the Chunk
-                    target_node_uuid=data.get("target_node_uuid"), # UUID of the Entity/Product
-                    score=data.get("score", 0.0), 
-                    result_type="Mention",
-                    metadata=item_metadata
-                ))
-        else:
-            final_items = []
-        
         duration = (time.perf_counter() - start_time) * 1000
-        logger.info(f"Mention search completed in {duration:.2f} ms, found {len(final_items)} items.")
-        return final_items
+        method_counts = {method: len(results) for method, results in fetched_results_by_method.items()}
+        logger.info(f"SearchManager: Mention data fetching for '{query_text}' completed in {duration:.2f} ms. Results per method: {method_counts}")
+        
+        return fetched_results_by_method
     
-    async def search_chunks(self, query_text: str, config: ChunkSearchConfig, query_embedding: Optional[List[float]] = None) -> List[SearchResultItem]:
+    async def search_chunks(self, query_text: str, config: ChunkSearchConfig, query_embedding: Optional[List[float]] = None) -> Dict[str, List[Dict[str, Any]]]: # MODIFIED return type
         start_time = time.perf_counter()
-        logger.info(f"Searching chunks for: '{query_text}'")
+        logger.info(f"SearchManager: Fetching chunk data for query: '{query_text}' (will be RRF'd later if applicable)")
         
-        combined_method_results: List[Dict[str, Any]] = await self._fetch_chunks_combined(
-            query_text, config, query_embedding
-        )
-        
-        if not combined_method_results:
-            logger.info("No results from combined fetch for chunks.")
-            duration_empty = (time.perf_counter() - start_time) * 1000
-            logger.info(f"Chunk search (empty results) completed in {duration_empty:.2f} ms.")
-            return []
-
-        all_method_results_for_rrf: List[List[Dict[str, Any]]] = []
-        if config.reranker == ChunkRerankerMethod.RRF:
-            grouped_by_method: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-            for res in combined_method_results: 
-                grouped_by_method[res.get("method_source", "unknown")].append(res)
-            all_method_results_for_rrf = list(grouped_by_method.values())
-        
-        final_items: List[SearchResultItem]
-        if config.reranker == ChunkRerankerMethod.RRF and all_method_results_for_rrf:
-            final_items = self._apply_rrf(all_method_results_for_rrf, config.rrf_k, config.limit, "Chunk")
-        elif combined_method_results: 
-            logger.debug("Applying simple sort for chunks as RRF is not configured or results could not be split by method.")
-            combined_method_results.sort(key=lambda x: x.get('score', 0.0), reverse=True)
-            final_items = [
-                SearchResultItem(
-                    uuid=data["uuid"], 
-                    name=data.get("name"), 
-                    content=data.get("content"), 
-                    score=data.get("score", 0.0), 
-                    result_type="Chunk", 
-                    metadata={
-                        "source_description": data.get("source_description"),
-                        "chunk_number": data.get("chunk_number"),
-                        "method_source": data.get("method_source", "unknown") 
-                    }
-                ) for data in combined_method_results[:config.limit]
-            ]
-        else:
-            final_items = []
-        
-        duration = (time.perf_counter() - start_time) * 1000
-        logger.info(f"Chunk search completed in {duration:.2f} ms, found {len(final_items)} items.")
-        return final_items
-
-    async def search_entities(self, query_text: str, config: EntitySearchConfig, query_embedding: Optional[List[float]] = None) -> List[SearchResultItem]:
-        start_time = time.perf_counter()
-        logger.info(f"Searching entities for: '{query_text}'")
-        
-        combined_method_results: List[Dict[str, Any]] = await self._fetch_entities_combined(
+        # --- Start of modification ---
+        fetched_results_by_method: Dict[str, List[Dict[str, Any]]] = await self._fetch_chunks_combined(
             query_text, config, query_embedding
         )
 
-        if not combined_method_results:
-            logger.info("No results from combined fetch for entities.")
-            duration_empty = (time.perf_counter() - start_time) * 1000
-            logger.info(f"Entity search (empty results) completed in {duration_empty:.2f} ms.")
-            return []
+        # The RRF logic and SearchResultItem creation is removed from here.
+        # It will be handled in GraphForRAG.search after inter-query RRF.
 
-        all_method_results_for_rrf: List[List[Dict[str, Any]]] = []
-        if config.reranker == EntityRerankerMethod.RRF:
-            grouped_by_method: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-            for res in combined_method_results:
-                grouped_by_method[res.get("method_source", "unknown")].append(res)
-            all_method_results_for_rrf = list(grouped_by_method.values())
-
-        final_items: List[SearchResultItem]
-        if config.reranker == EntityRerankerMethod.RRF and all_method_results_for_rrf:
-            final_items = self._apply_rrf(all_method_results_for_rrf, config.rrf_k, config.limit, "Entity")
-        elif combined_method_results:
-            logger.debug("Applying simple sort for entities as RRF is not configured or results could not be split.")
-            combined_method_results.sort(key=lambda x: x.get('score', 0.0), reverse=True)
-            final_items = [
-                SearchResultItem(
-                    uuid=data["uuid"], 
-                    name=data.get("name"), 
-                    # description=data.get("description"), # REMOVED
-                    label=data.get("label"), 
-                    score=data.get("score", 0.0), 
-                    result_type="Entity",
-                    metadata={"method_source": data.get("method_source", "unknown")}
-                ) for data in combined_method_results[:config.limit]
-            ]
-        else:
-            final_items = []
-        
         duration = (time.perf_counter() - start_time) * 1000
-        logger.info(f"Entity search completed in {duration:.2f} ms, found {len(final_items)} items.")
-        return final_items
-
-    async def search_relationships(self, query_text: str, config: RelationshipSearchConfig, query_embedding: Optional[List[float]] = None) -> List[SearchResultItem]:
-        start_time = time.perf_counter()
-        logger.info(f"Searching relationships for: '{query_text}'")
+        # Log the counts of raw results fetched per method
+        method_counts = {method: len(results) for method, results in fetched_results_by_method.items()}
+        logger.info(f"SearchManager: Chunk data fetching for '{query_text}' completed in {duration:.2f} ms. Results per method: {method_counts}")
         
-        combined_method_results: List[Dict[str, Any]] = await self._fetch_relationships_combined(
+        return fetched_results_by_method
+
+    async def search_entities(self, query_text: str, config: EntitySearchConfig, query_embedding: Optional[List[float]] = None) -> Dict[str, List[Dict[str, Any]]]: # MODIFIED return type
+        start_time = time.perf_counter()
+        logger.info(f"SearchManager: Fetching entity data for query: '{query_text}' (will be RRF'd later if applicable)")
+        
+        # --- Start of modification ---
+        fetched_results_by_method: Dict[str, List[Dict[str, Any]]] = await self._fetch_entities_combined(
             query_text, config, query_embedding
         )
 
-        if not combined_method_results:
-            logger.info("No results from combined fetch for relationships.")
-            duration_empty = (time.perf_counter() - start_time) * 1000
-            logger.info(f"Relationship search (empty results) completed in {duration_empty:.2f} ms.")
-            return []
-
-        all_method_results_for_rrf: List[List[Dict[str, Any]]] = []
-        if config.reranker == RelationshipRerankerMethod.RRF:
-            grouped_by_method: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-            for res in combined_method_results:
-                grouped_by_method[res.get("method_source", "unknown")].append(res)
-            all_method_results_for_rrf = list(grouped_by_method.values())
-            
-        final_items: List[SearchResultItem]
-        if config.reranker == RelationshipRerankerMethod.RRF and all_method_results_for_rrf:
-            final_items = self._apply_rrf(all_method_results_for_rrf, config.rrf_k, config.limit, "Relationship")
-        elif combined_method_results:
-            logger.debug("Applying simple sort for relationships as RRF is not configured or results could not be split.")
-            combined_method_results.sort(key=lambda x: x.get('score', 0.0), reverse=True)
-            final_items = [
-                SearchResultItem(
-                    uuid=data["uuid"],name=data.get("name"), fact_sentence=data.get("fact_sentence"),
-                    source_entity_uuid=data.get("source_entity_uuid"),target_entity_uuid=data.get("target_entity_uuid"),
-                    score=data.get("score", 0.0), result_type="Relationship",
-                    metadata={"method_source": data.get("method_source", "unknown")}
-                ) for data in combined_method_results[:config.limit]
-            ]
-        else:
-            final_items = []
+        # RRF logic and SearchResultItem creation removed.
         
         duration = (time.perf_counter() - start_time) * 1000
-        logger.info(f"Relationship search completed in {duration:.2f} ms, found {len(final_items)} items.")
-        return final_items
-
-    async def search_sources(self, query_text: str, config: SourceSearchConfig, query_embedding: Optional[List[float]] = None) -> List[SearchResultItem]:
-        start_time = time.perf_counter()
-        logger.info(f"Searching sources for: '{query_text}'")
+        method_counts = {method: len(results) for method, results in fetched_results_by_method.items()}
+        logger.info(f"SearchManager: Entity data fetching for '{query_text}' completed in {duration:.2f} ms. Results per method: {method_counts}")
         
-        combined_method_results: List[Dict[str, Any]] = await self._fetch_sources_combined(
+        return fetched_results_by_method
+
+    async def search_relationships(self, query_text: str, config: RelationshipSearchConfig, query_embedding: Optional[List[float]] = None) -> Dict[str, List[Dict[str, Any]]]: # MODIFIED return type
+        start_time = time.perf_counter()
+        logger.info(f"SearchManager: Fetching relationship data for query: '{query_text}' (will be RRF'd later if applicable)")
+        
+        # --- Start of modification ---
+        fetched_results_by_method: Dict[str, List[Dict[str, Any]]] = await self._fetch_relationships_combined(
             query_text, config, query_embedding
         )
 
-        if not combined_method_results:
-            logger.info("No results from combined fetch for sources.")
-            duration_empty = (time.perf_counter() - start_time) * 1000
-            logger.info(f"Source search (empty results) completed in {duration_empty:.2f} ms.")
-            return []
+        # RRF logic and SearchResultItem creation removed.
 
-        all_method_results_for_rrf: List[List[Dict[str, Any]]] = []
-        if config.reranker == SourceRerankerMethod.RRF:
-            grouped_by_method: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-            for res in combined_method_results:
-                grouped_by_method[res.get("method_source", "unknown")].append(res)
-            all_method_results_for_rrf = list(grouped_by_method.values())
-
-        final_items: List[SearchResultItem]
-        if config.reranker == SourceRerankerMethod.RRF and all_method_results_for_rrf:
-            final_items = self._apply_rrf(all_method_results_for_rrf, config.rrf_k, config.limit, "Source")
-        elif combined_method_results:
-            logger.debug("Applying simple sort for sources as RRF is not configured or results could not be split.")
-            combined_method_results.sort(key=lambda x: x.get('score', 0.0), reverse=True)
-            final_items = [
-                SearchResultItem(
-                    uuid=data["uuid"], name=data.get("name"), content=data.get("content"), 
-                    score=data.get("score", 0.0), result_type="Source",
-                    metadata={"method_source": data.get("method_source", "unknown")}
-                ) for data in combined_method_results[:config.limit]
-            ]
-        else:
-            final_items = []
-        
         duration = (time.perf_counter() - start_time) * 1000
-        logger.info(f"Source search completed in {duration:.2f} ms, found {len(final_items)} items.")
-        return final_items
+        method_counts = {method: len(results) for method, results in fetched_results_by_method.items()}
+        logger.info(f"SearchManager: Relationship data fetching for '{query_text}' completed in {duration:.2f} ms. Results per method: {method_counts}")
+        
+        return fetched_results_by_method
+
+    async def search_sources(self, query_text: str, config: SourceSearchConfig, query_embedding: Optional[List[float]] = None) -> Dict[str, List[Dict[str, Any]]]: # MODIFIED return type
+        start_time = time.perf_counter()
+        logger.info(f"SearchManager: Fetching source data for query: '{query_text}' (will be RRF'd later if applicable)")
+        
+        # --- Start of modification ---
+        fetched_results_by_method: Dict[str, List[Dict[str, Any]]] = await self._fetch_sources_combined(
+            query_text, config, query_embedding
+        )
+
+        # RRF logic and SearchResultItem creation removed.
+
+        duration = (time.perf_counter() - start_time) * 1000
+        method_counts = {method: len(results) for method, results in fetched_results_by_method.items()}
+        logger.info(f"SearchManager: Source data fetching for '{query_text}' completed in {duration:.2f} ms. Results per method: {method_counts}")
+        
+        return fetched_results_by_method
     
     async def _fetch_products_combined(
         self,
         query_text: str,
         config: ProductSearchConfig,
         query_embedding: Optional[List[float]]
-    ) -> List[Dict[str, Any]]:
-        cypher_parts = []
-        params: Dict[str, Any] = {}
-        keyword_part_included = False
-        semantic_name_part_included = False
-        semantic_content_part_included = False
+    # ) -> List[Dict[str, Any]]: # Old
+    ) -> Dict[str, List[Dict[str, Any]]]: # New return type
+        # --- Start of modification ---
+        results_by_method: Dict[str, List[Dict[str, Any]]] = {}
+        # keyword_part_included = False # Old
+        # semantic_name_part_included = False # Old
+        # semantic_content_part_included = False # Old
 
         if ProductSearchMethod.KEYWORD_NAME_CONTENT in config.search_methods and query_text.strip():
             lucene_query_str = construct_lucene_query(query_text)
             if lucene_query_str:
-                params["keyword_query_string_product"] = lucene_query_str
-                params["keyword_limit_param_product"] = config.keyword_fetch_limit
-                params["index_name_keyword_product"] = "product_name_content_ft" # Uses new index
-                cypher_parts.append(cypher_queries.PRODUCT_SEARCH_KEYWORD_PART)
-                keyword_part_included = True
+                keyword_params = {
+                    "keyword_query_string_product": lucene_query_str,
+                    "keyword_limit_param_product": config.keyword_fetch_limit,
+                    "index_name_keyword_product": "product_name_content_ft"
+                }
+                try:
+                    logger.debug(f"_fetch_products_combined (KeywordNameContent): Executing. Query:\n{cypher_queries.PRODUCT_SEARCH_KEYWORD_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in keyword_params.items()} }")
+                    fetch_start_time_kw = time.perf_counter()
+                    keyword_db_results, _, _ = await self.driver.execute_query(
+                        cypher_queries.PRODUCT_SEARCH_KEYWORD_PART, keyword_params, database_=self.database
+                    )
+                    fetch_duration_kw = (time.perf_counter() - fetch_start_time_kw) * 1000
+                    logger.debug(f"_fetch_products_combined (KeywordNameContent): DB query took {fetch_duration_kw:.2f} ms. Rows: {len(keyword_db_results)}")
+                    results_by_method["keyword_name_content"] = [dict(record) for record in keyword_db_results]
+                except Exception as e_kw:
+                    logger.error(f"Error during _fetch_products_combined (KeywordNameContent): {e_kw}", exc_info=True)
+                    results_by_method["keyword_name_content"] = []
             else:
-                logger.debug("_fetch_products_combined: Keyword part skipped due to empty Lucene query.")
+                logger.debug("_fetch_products_combined (KeywordNameContent): Skipped due to empty Lucene query.")
+                results_by_method["keyword_name_content"] = []
+
 
         if ProductSearchMethod.SEMANTIC_NAME in config.search_methods and query_embedding:
-            params["semantic_embedding_product_name"] = query_embedding
-            params["semantic_limit_product_name"] = config.semantic_name_fetch_limit
-            params["semantic_min_score_product_name"] = config.min_similarity_score_name
-            params["index_name_semantic_product_name"] = "product_name_embedding_vector"
-            cypher_parts.append(cypher_queries.PRODUCT_SEARCH_SEMANTIC_NAME_PART)
-            semantic_name_part_included = True
+            semantic_name_params = {
+                "semantic_embedding_product_name": query_embedding,
+                "semantic_limit_product_name": config.semantic_name_fetch_limit,
+                "semantic_min_score_product_name": config.min_similarity_score_name,
+                "index_name_semantic_product_name": "product_name_embedding_vector"
+            }
+            try:
+                logger.debug(f"_fetch_products_combined (SemanticName): Executing. Query:\n{cypher_queries.PRODUCT_SEARCH_SEMANTIC_NAME_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in semantic_name_params.items()} }")
+                fetch_start_time_sem_name = time.perf_counter()
+                semantic_name_db_results, _, _ = await self.driver.execute_query(
+                    cypher_queries.PRODUCT_SEARCH_SEMANTIC_NAME_PART, semantic_name_params, database_=self.database
+                )
+                fetch_duration_sem_name = (time.perf_counter() - fetch_start_time_sem_name) * 1000
+                logger.debug(f"_fetch_products_combined (SemanticName): DB query took {fetch_duration_sem_name:.2f} ms. Rows: {len(semantic_name_db_results)}")
+                results_by_method["semantic_name"] = [dict(record) for record in semantic_name_db_results]
+            except Exception as e_sem_name:
+                logger.error(f"Error during _fetch_products_combined (SemanticName): {e_sem_name}", exc_info=True)
+                results_by_method["semantic_name"] = []
         else:
-            logger.debug("_fetch_products_combined: Semantic Name part skipped.")
+            logger.debug("_fetch_products_combined (SemanticName): Skipped (no embedding or not in config).")
+            if ProductSearchMethod.SEMANTIC_NAME in config.search_methods:
+                 results_by_method["semantic_name"] = []
+
 
         if ProductSearchMethod.SEMANTIC_CONTENT in config.search_methods and query_embedding:
-            params["semantic_embedding_product_content"] = query_embedding
-            params["semantic_limit_product_content"] = config.semantic_content_fetch_limit
-            params["semantic_min_score_product_content"] = config.min_similarity_score_content
-            params["index_name_semantic_product_content"] = "product_content_embedding_vector" # Uses new index
-            cypher_parts.append(cypher_queries.PRODUCT_SEARCH_SEMANTIC_CONTENT_PART)
-            semantic_content_part_included = True
+            semantic_content_params = {
+                "semantic_embedding_product_content": query_embedding,
+                "semantic_limit_product_content": config.semantic_content_fetch_limit,
+                "semantic_min_score_product_content": config.min_similarity_score_content,
+                "index_name_semantic_product_content": "product_content_embedding_vector"
+            }
+            try:
+                logger.debug(f"_fetch_products_combined (SemanticContent): Executing. Query:\n{cypher_queries.PRODUCT_SEARCH_SEMANTIC_CONTENT_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in semantic_content_params.items()} }")
+                fetch_start_time_sem_content = time.perf_counter()
+                semantic_content_db_results, _, _ = await self.driver.execute_query(
+                    cypher_queries.PRODUCT_SEARCH_SEMANTIC_CONTENT_PART, semantic_content_params, database_=self.database
+                )
+                fetch_duration_sem_content = (time.perf_counter() - fetch_start_time_sem_content) * 1000
+                logger.debug(f"_fetch_products_combined (SemanticContent): DB query took {fetch_duration_sem_content:.2f} ms. Rows: {len(semantic_content_db_results)}")
+                results_by_method["semantic_content"] = [dict(record) for record in semantic_content_db_results]
+            except Exception as e_sem_content:
+                logger.error(f"Error during _fetch_products_combined (SemanticContent): {e_sem_content}", exc_info=True)
+                results_by_method["semantic_content"] = []
         else:
-            logger.debug("_fetch_products_combined: Semantic Content part skipped.")
-            
-        if not cypher_parts:
-            logger.info("_fetch_products_combined: No search parts to execute.")
-            return []
+            logger.debug("_fetch_products_combined (SemanticContent): Skipped (no embedding or not in config).")
+            if ProductSearchMethod.SEMANTIC_CONTENT in config.search_methods:
+                 results_by_method["semantic_content"] = []
 
-        final_query = " UNION ALL ".join(cypher_parts)
-        try:
-            param_keys_for_log = {k: (type(v).__name__ if not isinstance(v, list) else f"list_len_{len(v)}") for k,v in params.items()}
-            logger.debug(f"_fetch_products_combined: Executing with {len(cypher_parts)} part(s) (K: {keyword_part_included}, SN: {semantic_name_part_included}, SC: {semantic_content_part_included}). Query:\n{final_query}\nParams: {param_keys_for_log}")
-            fetch_start_time = time.perf_counter()
-            results, summary, _ = await self.driver.execute_query(final_query, params, database_=self.database)
-            fetch_duration = (time.perf_counter() - fetch_start_time) * 1000
-            num_rows_returned = len(results)
-            logger.debug(f"_fetch_products_combined: DB query took {fetch_duration:.2f} ms. Rows returned: {num_rows_returned}")
-            return [dict(record) for record in results]
-        except Exception as e:
-            logger.error(f"Error during _fetch_products_combined: {e}", exc_info=True); return []
+        logger.debug(f"_fetch_products_combined: Returning results by method: { {k: len(v) for k,v in results_by_method.items()} }")
+        return results_by_method
             
-    async def search_products(self, query_text: str, config: ProductSearchConfig, query_embedding: Optional[List[float]] = None) -> List[SearchResultItem]:
+    async def search_products(self, query_text: str, config: ProductSearchConfig, query_embedding: Optional[List[float]] = None) -> Dict[str, List[Dict[str, Any]]]: # MODIFIED return type
         start_time = time.perf_counter()
-        logger.info(f"Searching products for: '{query_text}'")
+        logger.info(f"SearchManager: Fetching product data for query: '{query_text}' (will be RRF'd later if applicable)")
         
-        combined_method_results: List[Dict[str, Any]] = await self._fetch_products_combined(
+        # --- Start of modification ---
+        fetched_results_by_method: Dict[str, List[Dict[str, Any]]] = await self._fetch_products_combined(
             query_text, config, query_embedding
         )
 
-        if not combined_method_results:
-            logger.info("No results from combined fetch for products.")
-            duration_empty = (time.perf_counter() - start_time) * 1000
-            logger.info(f"Product search (empty results) completed in {duration_empty:.2f} ms.")
-            return []
-
-        all_method_results_for_rrf: List[List[Dict[str, Any]]] = []
-        if config.reranker == ProductRerankerMethod.RRF:
-            grouped_by_method: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-            for res in combined_method_results:
-                grouped_by_method[res.get("method_source", "unknown")].append(res)
-            all_method_results_for_rrf = list(grouped_by_method.values())
-
-        final_items: List[SearchResultItem]
-        if config.reranker == ProductRerankerMethod.RRF and all_method_results_for_rrf:
-            final_items = self._apply_rrf(all_method_results_for_rrf, config.rrf_k, config.limit, "Product")
-        elif combined_method_results:
-            logger.debug("Applying simple sort for products as RRF is not configured or results could not be split.")
-            combined_method_results.sort(key=lambda x: x.get('score', 0.0), reverse=True)
-            # Logic to construct SearchResultItem for Product
-            final_items = []
-            for data in combined_method_results[:config.limit]:
-                item_metadata = {"method_source": data.get("method_source", "unknown")}
-                if data.get("sku") is not None:
-                    item_metadata["sku"] = data.get("sku")
-                if data.get("price") is not None:
-                    item_metadata["price"] = data.get("price")
-                
-                final_items.append(SearchResultItem(
-                    uuid=data["uuid"], 
-                    name=data.get("name"), 
-                    content=data.get("content"), # This is the JSON string for products
-                    score=data.get("score", 0.0), 
-                    result_type="Product",
-                    metadata=item_metadata
-                ))
-        else:
-            final_items = []
+        # RRF logic and SearchResultItem creation removed.
         
         duration = (time.perf_counter() - start_time) * 1000
-        logger.info(f"Product search completed in {duration:.2f} ms, found {len(final_items)} items.")
-        return final_items
+        method_counts = {method: len(results) for method, results in fetched_results_by_method.items()}
+        logger.info(f"SearchManager: Product data fetching for '{query_text}' completed in {duration:.2f} ms. Results per method: {method_counts}")
+        
+        return fetched_results_by_method
     

@@ -15,74 +15,74 @@ import json # json import might still be used by user for other things, but not 
 #   - metadata: A dictionary for all OTHER attributes of the chunk/product.
 
 source_data_sets = [
-    # {
-    #     "node_type": "source", 
-    #     "name": "Winnie-the-Pooh: A Tight Spot at Rabbit's House (Chapter II Excerpt)",
-    #     "content": "An extended excerpt from A. A. Milne's 'Winnie-the-Pooh', Chapter II, detailing Pooh's visit to Rabbit's house, his overindulgence in honey and condensed milk, and the subsequent predicament of getting stuck in Rabbit's front door. This section highlights the interactions between Pooh, Rabbit, and eventually Christopher Robin.",
-    #     "metadata": { 
-    #         "author": "A. A. Milne",
-    #         "original_publication_year": 1926,
-    #         "category": "Children's Literature",
-    #     },
-    #     "chunks": [ 
-    #         {
-    #             "node_type": "chunk", 
-    #             "name": "Pooh Visits Rabbit - The Snack",
-    #             "chunk_number": 1,
-    #             "content": "Winnie-the-Pooh always liked a little something at eleven o’clock in the morning, and he was very glad to see Rabbit getting out the plates and mugs. 'Is this a party?' he asked. 'No, Pooh Bear,' said Rabbit kindly, 'just a little something for you.' 'Oh, thank you, Rabbit,' said Pooh. Rabbit, who was a hospitable sort, produced a jar of honey and a tin of condensed milk. Pooh, never one to refuse, settled down to enjoy his snack. 'You're sure there's enough for me?' he asked, peering into the honey jar.",
-    #             "metadata": { 
-    #                 "characters_present": ["Winnie-the-Pooh", "Rabbit"], 
-    #                 "interaction_type": "Conversation, Hospitality", 
-    #                 "setting": "Rabbit's House - Parlour"
-    #             }
-    #         },
-    #         {
-    #             "node_type": "chunk", 
-    #             "name": "Pooh Overindulges",
-    #             "chunk_number": 2,
-    #             "content": "Rabbit watched Pooh eat. 'Would you like some more honey, Pooh?' he offered, noticing the jar was nearly empty. 'Well,' said Pooh, reaching for the condensed milk, 'I did mean to just have a little, but perhaps a tiny bit more honey wouldn't go amiss.' Rabbit, trying to be a good host, although a little worried about his provisions, refilled the jar. Pooh ate, and ate, and ate, until at last he said that he must be going. 'Must you?' said Rabbit politely. 'Well, if you're sure... goodbye, Pooh.'",
-    #             "metadata": {
-    #                 "characters_present": ["Winnie-the-Pooh", "Rabbit"], 
-    #                 "interaction_type": "Offering food, Eating, Polite conversation", 
-    #                 "theme": "Hospitality vs. Concern"
-    #             }
-    #         },
-    #         {
-    #             "node_type": "chunk",
-    #             "name": "Pooh Gets Stuck",
-    #             "chunk_number": 3,
-    #             "content": "Pooh Bear began to climb out of Rabbit's front door. He pulled with his front paws, and pushed with his back paws, and in a little while his nose was out in the open again... and then his ears... and then his front paws... and then his shoulders... and then— 'Oh, help!' said Pooh. 'I'd better go back.' 'Oh, bother!' said Pooh. 'I shall have to go on.' 'I can't do either!' said Pooh. 'Oh, help and bother!' Now, by this time Rabbit wanted to go for a walk too, and finding the front door full, he went out by the back door, and came round to Pooh, and looked at him.",
-    #             "metadata": {
-    #                 "characters_present": ["Winnie-the-Pooh", "Rabbit"],
-    #                 "interaction_type": "Physical struggle, Observation",
-    #                 "problem": "Pooh is stuck",
-    #                 "setting_detail": "Rabbit's front door"
-    #             }
-    #         },
-    #         {
-    #             "node_type": "chunk",
-    #             "name": "Rabbit's Assessment",
-    #             "chunk_number": 4,
-    #             "content": "'Hallo, are you stuck?' he asked. Pooh looked at him with his front paws dangling. 'N-no,' said Pooh carelessly. 'Just resting, and thinking, and humming to myself.' 'Here, give us a paw,' said Rabbit, and he took Pooh's paw and pulled, and Pooh pulled, but nothing happened. 'It all comes,' said Pooh crossly, 'of not having front doors big enough.' 'It all comes,' said Rabbit sternly, 'of eating too much. I thought at the time,' said Rabbit, 'only I didn't like to say anything,' said Rabbit, 'that one of us was eating too much,' said Rabbit, 'and I knew it wasn't me,' he said. 'He, he,' said Pooh.",
-    #             "metadata": {
-    #                 "characters_present": ["Winnie-the-Pooh", "Rabbit"],
-    #                 "interaction_type": "Dialogue, Attempted help, Gentle accusation",
-    #                 "theme": "Consequences of overeating"
-    #             }
-    #         },
-    #         {
-    #             "node_type": "chunk", 
-    #             "name": "Calling Christopher Robin", 
-    #             "chunk_number": 5, 
-    #             "content": "So Rabbit pushed and pushed from behind, and Pooh pulled and pulled from in front, but Pooh's bottom just stayed where it was. Rabbit scratched his whiskers. 'We shall have to get Christopher Robin,' he said. 'He'll know what to do.' He hurried off to find him. Pooh, left alone, tried to hum a comforting sort of song, but it wasn't very comforting because he couldn't think of any words for the middle part. Christopher Robin soon arrived with Rabbit. 'Silly old Bear,' he said affectionately, looking at Pooh's predicament.",
-    #             "metadata": { 
-    #                 "characters_present": ["Winnie-the-Pooh", "Rabbit", "Christopher Robin"],
-    #                 "interaction_type": "Decision to seek help, Arrival of help, Affectionate scolding",
-    #                 "resolution_pending": "Waiting for a solution"
-    #             }
-    #         }
-    #     ]
-    # },
+    {
+        "node_type": "source", 
+        "name": "Winnie-the-Pooh: A Tight Spot at Rabbit's House (Chapter II Excerpt)",
+        "content": "An extended excerpt from A. A. Milne's 'Winnie-the-Pooh', Chapter II, detailing Pooh's visit to Rabbit's house, his overindulgence in honey and condensed milk, and the subsequent predicament of getting stuck in Rabbit's front door. This section highlights the interactions between Pooh, Rabbit, and eventually Christopher Robin.",
+        "metadata": { 
+            "author": "A. A. Milne",
+            "original_publication_year": 1926,
+            "category": "Children's Literature",
+        },
+        "chunks": [ 
+            {
+                "node_type": "chunk", 
+                "name": "Pooh Visits Rabbit - The Snack",
+                "chunk_number": 1,
+                "content": "Winnie-the-Pooh always liked a little something at eleven o’clock in the morning, and he was very glad to see Rabbit getting out the plates and mugs. 'Is this a party?' he asked. 'No, Pooh Bear,' said Rabbit kindly, 'just a little something for you.' 'Oh, thank you, Rabbit,' said Pooh. Rabbit, who was a hospitable sort, produced a jar of honey and a tin of condensed milk. Pooh, never one to refuse, settled down to enjoy his snack. 'You're sure there's enough for me?' he asked, peering into the honey jar.",
+                "metadata": { 
+                    "characters_present": ["Winnie-the-Pooh", "Rabbit"], 
+                    "interaction_type": "Conversation, Hospitality", 
+                    "setting": "Rabbit's House - Parlour"
+                }
+            },
+            {
+                "node_type": "chunk", 
+                "name": "Pooh Overindulges",
+                "chunk_number": 2,
+                "content": "Rabbit watched Pooh eat. 'Would you like some more honey, Pooh?' he offered, noticing the jar was nearly empty. 'Well,' said Pooh, reaching for the condensed milk, 'I did mean to just have a little, but perhaps a tiny bit more honey wouldn't go amiss.' Rabbit, trying to be a good host, although a little worried about his provisions, refilled the jar. Pooh ate, and ate, and ate, until at last he said that he must be going. 'Must you?' said Rabbit politely. 'Well, if you're sure... goodbye, Pooh.'",
+                "metadata": {
+                    "characters_present": ["Winnie-the-Pooh", "Rabbit"], 
+                    "interaction_type": "Offering food, Eating, Polite conversation", 
+                    "theme": "Hospitality vs. Concern"
+                }
+            },
+            {
+                "node_type": "chunk",
+                "name": "Pooh Gets Stuck",
+                "chunk_number": 3,
+                "content": "Pooh Bear began to climb out of Rabbit's front door. He pulled with his front paws, and pushed with his back paws, and in a little while his nose was out in the open again... and then his ears... and then his front paws... and then his shoulders... and then— 'Oh, help!' said Pooh. 'I'd better go back.' 'Oh, bother!' said Pooh. 'I shall have to go on.' 'I can't do either!' said Pooh. 'Oh, help and bother!' Now, by this time Rabbit wanted to go for a walk too, and finding the front door full, he went out by the back door, and came round to Pooh, and looked at him.",
+                "metadata": {
+                    "characters_present": ["Winnie-the-Pooh", "Rabbit"],
+                    "interaction_type": "Physical struggle, Observation",
+                    "problem": "Pooh is stuck",
+                    "setting_detail": "Rabbit's front door"
+                }
+            },
+            {
+                "node_type": "chunk",
+                "name": "Rabbit's Assessment",
+                "chunk_number": 4,
+                "content": "'Hallo, are you stuck?' he asked. Pooh looked at him with his front paws dangling. 'N-no,' said Pooh carelessly. 'Just resting, and thinking, and humming to myself.' 'Here, give us a paw,' said Rabbit, and he took Pooh's paw and pulled, and Pooh pulled, but nothing happened. 'It all comes,' said Pooh crossly, 'of not having front doors big enough.' 'It all comes,' said Rabbit sternly, 'of eating too much. I thought at the time,' said Rabbit, 'only I didn't like to say anything,' said Rabbit, 'that one of us was eating too much,' said Rabbit, 'and I knew it wasn't me,' he said. 'He, he,' said Pooh.",
+                "metadata": {
+                    "characters_present": ["Winnie-the-Pooh", "Rabbit"],
+                    "interaction_type": "Dialogue, Attempted help, Gentle accusation",
+                    "theme": "Consequences of overeating"
+                }
+            },
+            {
+                "node_type": "chunk", 
+                "name": "Calling Christopher Robin", 
+                "chunk_number": 5, 
+                "content": "So Rabbit pushed and pushed from behind, and Pooh pulled and pulled from in front, but Pooh's bottom just stayed where it was. Rabbit scratched his whiskers. 'We shall have to get Christopher Robin,' he said. 'He'll know what to do.' He hurried off to find him. Pooh, left alone, tried to hum a comforting sort of song, but it wasn't very comforting because he couldn't think of any words for the middle part. Christopher Robin soon arrived with Rabbit. 'Silly old Bear,' he said affectionately, looking at Pooh's predicament.",
+                "metadata": { 
+                    "characters_present": ["Winnie-the-Pooh", "Rabbit", "Christopher Robin"],
+                    "interaction_type": "Decision to seek help, Arrival of help, Affectionate scolding",
+                    "resolution_pending": "Waiting for a solution"
+                }
+            }
+        ]
+    },
     {
         "node_type": "source", 
         "name": "Navigating the World of Personal Computers: 2024 Edition",

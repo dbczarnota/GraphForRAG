@@ -83,7 +83,7 @@ async def main():
         timings["graphforrag_init_total"] = (time.perf_counter() - graph_init_overall_start_time) * 1000
         logger.info(f"MAIN: GraphForRAG instance creation took {timings['graphforrag_init_total']:.2f} ms")
         
-        run_data_setup = True 
+        run_data_setup = False 
         if run_data_setup:
             logger.info(f"Schema/Data setup started at: {get_current_time_ms()}")
             setup_overall_start_time = time.perf_counter()
@@ -113,22 +113,24 @@ async def main():
 
         section_start_time = time.perf_counter()
         data_exists = False
-        try:
-            if graph and graph.driver:
-                query_result = await graph.driver.execute_query("MATCH (c:Chunk) RETURN count(c) > 0 AS chunks_exist", database_=graph.database)
-                if query_result and query_result[0] and query_result[0][0]: 
-                    data_exists = query_result[0][0].get("chunks_exist", False)
-        except Exception as e_db_check:
-            logger.error(f"Error checking for data existence: {e_db_check}", exc_info=True)
+        # try:
+        #     if graph and graph.driver:
+        #         query_result = await graph.driver.execute_query("MATCH (c:Chunk) RETURN count(c) > 0 AS chunks_exist", database_=graph.database)
+        #         if query_result and query_result[0] and query_result[0][0]: 
+        #             data_exists = query_result[0][0].get("chunks_exist", False)
+        # except Exception as e_db_check:
+        #     logger.error(f"Error checking for data existence: {e_db_check}", exc_info=True)
 
-        if not data_exists and not run_data_setup:
-             logger.warning("No Chunk data found. Please run ingestion at least once (set run_data_setup=True).")
-             # If no data and not running setup, we might want to return early or skip search
-             # For now, it will proceed but search will likely find nothing.
-        timings["data_existence_check"] = (time.perf_counter() - section_start_time) * 1000
+        # if not data_exists and not run_data_setup:
+        #      logger.warning("No Chunk data found. Please run ingestion at least once (set run_data_setup=True).")
+        #      # If no data and not running setup, we might want to return early or skip search
+        #      # For now, it will proceed but search will likely find nothing.
+        # timings["data_existence_check"] = (time.perf_counter() - section_start_time) * 1000
+        data_exists = True
 
-
-        full_search_query = "Pooh Bear stuck in Rabbit's front door eating honey"
+        # full_search_query = "What is Pooh favourite food?"
+        full_search_query = "What type of cover does Surface Pro have?"
+        # full_search_query = "Compare Surface Pro to Macbook air?"
         
         timings["query_embedding_generation (explicit_in_main)"] = 0.0 
         logger.info(f"MAIN: Explicit query embedding generation in main is SKIPPED for this test.")
@@ -138,7 +140,9 @@ async def main():
         
         comprehensive_search_config = SearchConfig(
             chunk_config=ChunkSearchConfig(
-                search_methods=[ChunkSearchMethod.KEYWORD, ChunkSearchMethod.SEMANTIC],
+                search_methods=[
+                    ChunkSearchMethod.KEYWORD, 
+                    ChunkSearchMethod.SEMANTIC],
                 limit=3, 
                 min_results=2, 
                 keyword_fetch_limit=10, 
@@ -159,7 +163,9 @@ async def main():
                 rrf_k=60
             ),
             relationship_config=RelationshipSearchConfig(
-                search_methods=[RelationshipSearchMethod.KEYWORD_FACT, RelationshipSearchMethod.SEMANTIC_FACT],
+                search_methods=[
+                    RelationshipSearchMethod.KEYWORD_FACT, 
+                    RelationshipSearchMethod.SEMANTIC_FACT],
                 limit=3, 
                 min_results=1, 
                 keyword_fetch_limit=10, 
@@ -168,7 +174,9 @@ async def main():
                 rrf_k=60
             ),
             mention_config=MentionSearchConfig( # ADDED mention_config section
-                search_methods=[MentionSearchMethod.KEYWORD_FACT, MentionSearchMethod.SEMANTIC_FACT],
+                search_methods=[
+                    MentionSearchMethod.KEYWORD_FACT, 
+                    MentionSearchMethod.SEMANTIC_FACT],
                 limit=3,
                 min_results=1,
                 keyword_fetch_limit=10,
@@ -177,7 +185,9 @@ async def main():
                 rrf_k=60
             ),
             source_config=SourceSearchConfig( 
-                search_methods=[SourceSearchMethod.KEYWORD_CONTENT, SourceSearchMethod.SEMANTIC_CONTENT],
+                search_methods=[
+                    SourceSearchMethod.KEYWORD_CONTENT, 
+                    SourceSearchMethod.SEMANTIC_CONTENT],
                 limit=2, 
                 min_results=1, 
                 keyword_fetch_limit=5, 
@@ -202,7 +212,7 @@ async def main():
             ),
             mqr_config=MultiQueryConfig( 
                 enabled=True, 
-                max_alternative_questions=2 
+                max_alternative_questions=4 
             ),
             overall_results_limit=10 
         )
@@ -211,7 +221,7 @@ async def main():
         timings["search_config_setup_log"] = (time.perf_counter() - section_start_time) * 1000
         logger.info(f"Using comprehensive search config (setup/log took {timings['search_config_setup_log']:.2f} ms): {config_dump_str}")
 
-        
+
         section_start_time = time.perf_counter()
         if graph: 
             if data_exists or run_data_setup : 
