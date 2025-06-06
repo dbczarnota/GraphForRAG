@@ -92,7 +92,7 @@ async def main():
         timings["graphforrag_init_total"] = (time.perf_counter() - graph_init_overall_start_time) * 1000
         logger.info(f"MAIN: GraphForRAG instance creation took {timings['graphforrag_init_total']:.2f} ms")
         
-        run_data_setup = True 
+        run_data_setup = False 
         if run_data_setup:
             logger.info(f"Schema/Data setup started at: {get_current_time_ms()}")
             setup_overall_start_time = time.perf_counter()
@@ -137,8 +137,8 @@ async def main():
         # timings["data_existence_check"] = (time.perf_counter() - section_start_time) * 1000
         data_exists = True
 
-        # full_search_query = "What is Pooh favourite food?"
-        full_search_query = "What type of cover does Surface Pro have?"
+        full_search_query = "What is Pooh favourite food?"
+        # full_search_query = "What type of cover does Surface Pro have?"
         # full_search_query = "Compare Surface Pro to Macbook air?"
         
         timings["query_embedding_generation (explicit_in_main)"] = 0.0 
@@ -254,6 +254,27 @@ async def main():
                              logger.info(f"    Mention Source (Chunk) UUID: {item.source_node_uuid}")
                         if item.target_node_uuid and item.result_type == "Mention": # Specific for Mention
                              logger.info(f"    Mention Target (Entity/Product) UUID: {item.target_node_uuid}")
+                        if item.connected_facts and (item.result_type == "Entity" or item.result_type == "Product"):
+                            logger.info(f"    Connected Facts ({len(item.connected_facts)}):")
+                            for fact_idx, fact_data in enumerate(item.connected_facts):
+                                if fact_data is None:
+                                    logger.warning(f"      {fact_idx+1}. Encountered a null fact_data object. Skipping.")
+                                    continue
+                                fact_type = fact_data.get('type', 'Unknown Type')
+                                fact_label = fact_data.get('label', '') # For RELATES_TO
+                                fact_text = fact_data.get('fact', 'N/A')
+                                
+                                if fact_type == 'RELATES_TO_OUTGOING':
+                                    target_name = fact_data.get('target_node_name', 'Unknown Target')
+                                    logger.info(f"      {fact_idx+1}. [{fact_type}] --[{fact_label}]--> {target_name}: \"{fact_text[:70]}...\"")
+                                elif fact_type == 'RELATES_TO_INCOMING':
+                                    source_name = fact_data.get('source_node_name', 'Unknown Source')
+                                    logger.info(f"      {fact_idx+1}. [{fact_type}] <--[{fact_label}]-- {source_name}: \"{fact_text[:70]}...\"")
+                                elif fact_type == 'MENTIONED_IN_CHUNK':
+                                    chunk_name = fact_data.get('mentioning_chunk_name', 'Unknown Chunk')
+                                    logger.info(f"      {fact_idx+1}. [{fact_type}] in '{chunk_name}': \"{fact_text[:70]}...\"")
+                                else:
+                                    logger.info(f"      {fact_idx+1}. [{fact_type}]: {fact_data}") # Fallback
                         if item.metadata: logger.info(f"    Metadata: {item.metadata}")
                 else:
                     logger.info(f"No combined results found for '{full_search_query}'.")

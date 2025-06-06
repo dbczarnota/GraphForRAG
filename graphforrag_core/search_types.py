@@ -115,6 +115,10 @@ class SearchResultItem(BaseModel):
     target_node_uuid: Optional[str] = None # For Relationship and Mention (target of mention, e.g., Entity/Product)
     score: float
     result_type: Literal["Chunk", "Entity", "Relationship", "Source", "Product", "Mention"] # Added Product and Mention here
+    connected_facts: Optional[List[Dict[str, Any]]] = Field(
+        default=None, 
+        description="List of connected facts/relationships for Entity or Product nodes. Each fact is a dictionary."
+    )
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class CombinedSearchResults(BaseModel):

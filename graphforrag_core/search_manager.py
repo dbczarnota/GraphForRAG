@@ -473,6 +473,8 @@ class SearchManager:
                 })
             elif result_type == "Entity":
                 item_data_for_pydantic["label"] = primary_data.get("label")
+                if primary_data.get("connected_facts"):
+                    item_data_for_pydantic["connected_facts"] = primary_data.get("connected_facts")
             elif result_type == "Relationship":
                 item_data_for_pydantic["fact_sentence"] = primary_data.get("fact_sentence")
                 item_data_for_pydantic["source_node_uuid"] = primary_data.get("source_entity_uuid") # Note: key in Cypher query
@@ -485,6 +487,8 @@ class SearchManager:
                     item_data_for_pydantic["metadata"]["sku"] = primary_data.get("sku")
                 if primary_data.get("price") is not None:
                     item_data_for_pydantic["metadata"]["price"] = primary_data.get("price")
+                if primary_data.get("connected_facts"):
+                    item_data_for_pydantic["connected_facts"] = primary_data.get("connected_facts")
             elif result_type == "Mention":
                 item_data_for_pydantic["fact_sentence"] = primary_data.get("fact_sentence")
                 item_data_for_pydantic["source_node_uuid"] = primary_data.get("source_node_uuid") 
