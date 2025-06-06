@@ -13,7 +13,7 @@ from graphforrag_core.search_types import (
     CombinedSearchResults, SearchResultItem,
     MultiQueryConfig 
 )
-
+from graphforrag_core.types import IngestionConfig
 from dotenv import load_dotenv
 import os
 import logging
@@ -73,17 +73,26 @@ async def main():
 
         graph_init_overall_start_time = time.perf_counter()
         logger.info("MAIN: Initializing GraphForRAG instance (LLM client will be set up on demand by services)...")
+        
+        # Define ingestion config (example)
+        ingestion_llm_config = IngestionConfig(
+            ingestion_llm_models=["gpt-4.1-mini", "gemini-2.0-flash"],
+            extractable_entity_labels=["Product", "Brand", "Concept", "Company", "Person/Character", "Location"] # Example: Use only gpt-4o-mini for all ingestion tasks
+            # ingestion_llm_models=[] # Example: Use setup_fallback_model's defaults for ingestion
+            # ingestion_llm_models=None # Example: Use general LLM passed to G4R, or setup_fallback_model defaults if that was None
+        )
+
         graph = GraphForRAG(
             NEO4J_URI,
             NEO4J_USER,
             NEO4J_PASSWORD,
             embedder_client=openai_embedder,
-            llm_client=None 
+            ingestion_config=ingestion_llm_config # Pass the new config
         )
         timings["graphforrag_init_total"] = (time.perf_counter() - graph_init_overall_start_time) * 1000
         logger.info(f"MAIN: GraphForRAG instance creation took {timings['graphforrag_init_total']:.2f} ms")
         
-        run_data_setup = False 
+        run_data_setup = True 
         if run_data_setup:
             logger.info(f"Schema/Data setup started at: {get_current_time_ms()}")
             setup_overall_start_time = time.perf_counter()

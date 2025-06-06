@@ -31,7 +31,7 @@ from .search_types import (
     MultiQueryConfig
 )
 from .multi_query_generator import MultiQueryGenerator
-
+from .types import IngestionConfig
 
 logger = logging.getLogger("graph_for_rag")
 
@@ -43,7 +43,8 @@ class GraphForRAG:
         password: str,
         database: str = "neo4j",
         embedder_client: Optional[EmbedderClient] = None,
-        llm_client: Optional[Any] = None 
+        # llm_client: Optional[Any] = None, # --- REMOVED PARAMETER ---
+        ingestion_config: Optional[IngestionConfig] = None 
     ):
         logger.info(f"GraphForRAG initializing for DB '{database}' at '{uri}'.")
         init_start_time = time.perf_counter()
@@ -58,7 +59,8 @@ class GraphForRAG:
                 from .openai_embedder import OpenAIEmbedderConfig 
                 self.embedder = OpenAIEmbedder(OpenAIEmbedderConfig()) 
             
-            self._llm_client_input = llm_client
+            # self._llm_client_input = llm_client # --- REMOVED ---
+            self.ingestion_config = ingestion_config if ingestion_config else IngestionConfig() 
             self._services_llm_client: Optional[Any] = None 
 
             self._entity_extractor: Optional[EntityExtractor] = None
@@ -70,19 +72,14 @@ class GraphForRAG:
             self.node_manager = NodeManager(self.driver, self.database)
             self.search_manager = SearchManager(self.driver, self.database, self.embedder) 
             
-            self.total_generative_llm_usage: Usage = Usage() # RENAMED
-            self.total_embedding_usage: Usage = Usage() # ADDED
+            self.total_generative_llm_usage: Usage = Usage() 
+            self.total_embedding_usage: Usage = Usage() 
 
             logger.info(f"Using embedder: {self.embedder.config.model_name} with dimension {self.embedder.dimension}")
-            if self._llm_client_input:
-                model_name_for_log = "Unknown (passed-in client)"
-                if hasattr(self._llm_client_input, 'model') and isinstance(self._llm_client_input.model, str):
-                    model_name_for_log = self._llm_client_input.model
-                elif hasattr(self._llm_client_input, 'model_name') and isinstance(self._llm_client_input.model_name, str):
-                    model_name_for_log = self._llm_client_input.model_name
-                logger.info(f"GraphForRAG initialized with pre-configured LLM client: {model_name_for_log}")
+            if self.ingestion_config.ingestion_llm_models is not None:
+                 logger.info(f"GraphForRAG: Ingestion services will use specific LLM config: {self.ingestion_config.ingestion_llm_models if self.ingestion_config.ingestion_llm_models else 'setup_fallback_model defaults'}")
             else:
-                logger.info("GraphForRAG initialized. Services LLM client will be set up on first use if needed.")
+                 logger.info("GraphForRAG: Ingestion services will use default LLM setup (via setup_fallback_model).")
 
             logger.info(f"Successfully initialized Neo4j driver.")
         except Exception as e:
@@ -96,14 +93,19 @@ class GraphForRAG:
     
     def _ensure_services_llm_client(self) -> Any:
         if self._services_llm_client is None:
-            if self._llm_client_input:
-                self._services_llm_client = self._llm_client_input
-                logger.debug("Using pre-configured LLM client for services.")
-            else:
-                logger.info("Setting up default fallback LLM client for services...")
+            if self.ingestion_config and self.ingestion_config.ingestion_llm_models is not None:
+                models_for_ingestion_setup = self.ingestion_config.ingestion_llm_models
+                log_msg_model_source = models_for_ingestion_setup if models_for_ingestion_setup else "internal defaults of setup_fallback_model for ingestion"
+                logger.info(f"INGESTION: Setting up specific LLM client for ingestion services using models: {log_msg_model_source}.")
+                llm_setup_start_time = time.perf_counter()
+                self._services_llm_client = setup_fallback_model(models_for_ingestion_setup)
+                logger.info(f"INGESTION: Specific LLM client for ingestion setup took {(time.perf_counter() - llm_setup_start_time)*1000:.2f} ms.")
+            else: # This now becomes the default if ingestion_config.ingestion_llm_models is None
+                logger.info("INGESTION: No specific ingestion models configured. Setting up default fallback LLM client for ingestion services...")
+            # --- End of modification ---
                 llm_setup_start_time = time.perf_counter()
                 self._services_llm_client = setup_fallback_model() 
-                logger.info(f"Default fallback LLM client setup took {(time.perf_counter() - llm_setup_start_time)*1000:.2f} ms.")
+                logger.info(f"INGESTION: Default fallback LLM client for ingestion setup took {(time.perf_counter() - llm_setup_start_time)*1000:.2f} ms.")
         return self._services_llm_client
 
     @property
@@ -186,6 +188,14 @@ class GraphForRAG:
         _ = self.entity_resolver
         _ = self.relationship_extractor
         
+        labels_for_extraction: Optional[List[str]] = None
+        
+        if self.ingestion_config and self.ingestion_config.extractable_entity_labels:
+            labels_for_extraction = self.ingestion_config.extractable_entity_labels
+            logger.info(f"GraphForRAG: Using specific entity labels for ingestion: {labels_for_extraction}")
+        else:
+            logger.info("GraphForRAG: Using general entity extraction for ingestion (no specific labels configured).")        
+            
         # Correctly unpack the return values from add_documents_to_knowledge_base
         source_node_uuid, processed_item_node_uuids, gen_usage_for_set, embed_usage_for_set = await add_documents_to_knowledge_base(
             source_definition_block=source_data_block, 
@@ -193,7 +203,8 @@ class GraphForRAG:
             embedder=self.embedder,
             entity_extractor=self.entity_extractor, 
             entity_resolver=self.entity_resolver,   
-            relationship_extractor=self.relationship_extractor
+            relationship_extractor=self.relationship_extractor,
+            extractable_entity_labels_for_ingestion=labels_for_extraction
         )
         self._accumulate_generative_usage(gen_usage_for_set)
         self._accumulate_embedding_usage(embed_usage_for_set)

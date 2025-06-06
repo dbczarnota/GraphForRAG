@@ -181,3 +181,4 @@ class SearchConfig(BaseModel):
         ge=1, 
         description="Optional overall limit for the final number of results returned by the combined search. Applied after aggregation and sorting."
     )
+    

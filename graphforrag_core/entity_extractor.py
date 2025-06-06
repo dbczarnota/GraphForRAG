@@ -1,6 +1,6 @@
 # graphforrag_core/entity_extractor.py
 import logging
-from typing import Optional, Any, Tuple # <-- ADDED Tuple
+from typing import Optional, Any, Tuple, List # <-- ADDED Tuple
 
 from pydantic_ai import Agent
 from pydantic_ai.usage import Usage # Assuming this import works
@@ -44,15 +44,24 @@ class EntityExtractor:
     async def extract_entities(
         self, 
         text_content: str, 
-        context_text: Optional[str] = None
+        context_text: Optional[str] = None,
+        extractable_entity_labels: Optional[List[str]] = None
     ) -> Tuple[ExtractedEntitiesList, Optional[Usage]]: 
         if not text_content.strip():
             logger.warning("Received empty text_content for entity extraction. Returning empty list and no usage.")
             return ExtractedEntitiesList(entities=[]), None
-
+        
+        target_labels_prompt_section = ""
+        if extractable_entity_labels and len(extractable_entity_labels) > 0:
+            labels_str = ", ".join([f"'{label}'" for label in extractable_entity_labels])
+            target_labels_prompt_section = f"TARGET ENTITY LABELS TO FOCUS ON: [{labels_str}]\n"
+            logger.debug(f"Entity extraction will focus on labels: {extractable_entity_labels}")
+        else:
+            logger.debug("Entity extraction will perform general entity extraction (no specific labels provided).")
         user_prompt = ENTITY_EXTRACTION_USER_PROMPT_TEMPLATE.format(
             context_text=context_text if context_text else "No additional context provided.",
-            text_content=text_content
+            text_content=text_content,
+            target_labels_section=target_labels_prompt_section
         )
         
         current_op_usage: Optional[Usage] = None

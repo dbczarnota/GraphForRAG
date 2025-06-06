@@ -68,11 +68,15 @@ ENTITY_EXTRACTION_SYSTEM_PROMPT = """
 You are an expert AI assistant tasked with identifying and extracting named entities from the provided text.
 Your goal is to identify distinct real-world objects, concepts that are treated as subjects/objects, persons, organizations, locations, products, etc., and represent them consistently.
 
-Guidelines:
+If a specific list of "Target Entity Labels" is provided in the user prompt, you MUST primarily focus on extracting entities whose conceptual type aligns with one of these target labels.
+When assigning a label to an extracted entity, try to use one of the provided target labels if it's a good fit. If a very clear entity is present that doesn't fit any target label, you may still extract it with a more general label, but prioritize those matching the target list.
+If no specific "Target Entity Labels" list is provided, perform general entity extraction as described below.
+
+General Guidelines (apply whether or not target labels are provided, but are guided by target labels if present):
 - Focus on extracting nouns or noun phrases that represent distinct, tangible or clearly defined conceptual entities.
 - For each entity, provide the most complete and canonical name possible based on the information in the CURRENT TEXT. For example, if "Mr. John Smith" and "Smith" refer to the same person in the text, use "John Smith". If only "Pooh" is mentioned, use "Pooh", but if "Winnie-the-Pooh" is mentioned, prefer that.
 - If an entity is mentioned multiple times in the CURRENT TEXT, extract it only ONCE using its most representative or complete name.
-- For the 'label', assign a general category (e.g., Person, Organization, Location, Product, Concept, Event, Artwork, Miscellaneous). Start with broad categories. Consistency in labeling for the same entity across different mentions is important if discernible.
+- For the 'label', assign a general category. If target labels were provided, try to use one of them if appropriate. Otherwise, use general categories (e.g., Person, Organization, Location, Product, Concept, Event, Artwork, Miscellaneous). Consistency in labeling for the same entity across different mentions is important if discernible,
 - For 'fact_sentence_about_mention': Generate a concise, single-sentence definition or description of the entity, answering the question "What is [Entity Name]?" or "Who is [Entity Name]?" based *only* on its context in the CURRENT TEXT. This sentence should be factual and directly derivable. Max 20 words. Example: If text says "Rabbit, a good host, offered Pooh honey", for Rabbit, it could be "Rabbit is a good host who offered Pooh honey." For Pooh, it could be "Pooh is a character who likes honey." This statement will be stored as the fact_sentence on the MENTIONS relationship.
 - Do NOT extract attributes of entities as separate entities (e.g., for "blue car", extract "car" as an entity, not "blue" as an entity). Qualities like "speed", "demanding tasks", "resolution", "color accuracy", "refresh rate" are generally attributes or characteristics of other entities, not standalone entities themselves, unless the text treats them as a distinct subject or object of discussion.
 - Do NOT extract general activities, processes, or verbs as entities unless they are nominalized and treated as distinct concepts in the text (e.g., "The Investigation" if it's a formal named investigation).
@@ -84,6 +88,8 @@ ENTITY_EXTRACTION_USER_PROMPT_TEMPLATE = """
 Please extract all distinct entities from the following text content.
 For each entity, provide its name, a suitable label, and a 'fact_sentence_about_mention' as per the system guidelines (a concise definition/description answering "What/Who is [Entity Name]?" based on the text).
 If contextual information from previous turns/chunks is provided, use it to help disambiguate or understand the current text, but primarily focus on extracting entities explicitly mentioned or clearly implied in the CURRENT TEXT, adhering to the guidelines.
+
+{target_labels_section}
 
 CONTEXT (Optional, from previous text or related documents):
 {context_text}

@@ -29,7 +29,8 @@ async def _process_single_item_for_kb(
     entity_extractor: EntityExtractor,
     entity_resolver: EntityResolver,
     relationship_extractor: RelationshipExtractor,
-    previous_chunk_content: Optional[str] = None
+    previous_chunk_content: Optional[str] = None,
+    extractable_entity_labels_for_ingestion: Optional[List[str]] = None
 ) -> Tuple[Optional[str], Usage, Usage]: 
     
     current_item_generative_usage = Usage() 
@@ -121,7 +122,8 @@ async def _process_single_item_for_kb(
 
                 product_extracted_entities_list_model, product_extractor_usage = await entity_extractor.extract_entities(
                     text_content=text_to_extract_from, 
-                    context_text=None # Products generally don't have prior chunk context for this purpose
+                    context_text=None,
+                    extractable_entity_labels=extractable_entity_labels_for_ingestion
                 )
                 if product_extractor_usage: current_item_generative_usage += product_extractor_usage # Accumulate usage
 
@@ -317,7 +319,7 @@ async def _process_single_item_for_kb(
         resolved_entities_for_chunk: List[ResolvedEntityInfo] = [] 
         if entity_extractor and entity_resolver:
             extracted_entities_list_model, extractor_usage = await entity_extractor.extract_entities(
-                text_content=item_content, context_text=previous_chunk_content
+                text_content=item_content, context_text=previous_chunk_content, extractable_entity_labels=extractable_entity_labels_for_ingestion
             )
             if extractor_usage: current_item_generative_usage += extractor_usage 
 
@@ -470,6 +472,7 @@ async def add_documents_to_knowledge_base(
     entity_extractor: EntityExtractor,
     entity_resolver: EntityResolver,
     relationship_extractor: RelationshipExtractor,
+    extractable_entity_labels_for_ingestion: Optional[List[str]] = None 
 ) -> Tuple[Optional[str], List[str], Usage, Usage]: 
     
     total_generative_usage_for_source_set = Usage() 
@@ -523,7 +526,8 @@ async def add_documents_to_knowledge_base(
             entity_extractor=entity_extractor,
             entity_resolver=entity_resolver,
             relationship_extractor=relationship_extractor,
-            previous_chunk_content=previous_chunk_text_content 
+            previous_chunk_content=previous_chunk_text_content,
+            extractable_entity_labels_for_ingestion=extractable_entity_labels_for_ingestion
         )
         if item_gen_usage: total_generative_usage_for_source_set += item_gen_usage 
         if item_embed_usage: total_embedding_usage_for_source_set += item_embed_usage 
