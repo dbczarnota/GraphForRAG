@@ -297,38 +297,38 @@ RETURN node.uuid AS uuid, node.name AS name, node.content AS content,
        node.source_description AS source_description, node.chunk_number AS chunk_number,
        score, "semantic" AS method_source, properties(node) AS all_node_properties
 """
-
 ENTITY_SEARCH_KEYWORD_PART = """
 CALL db.index.fulltext.queryNodes($index_name_keyword_entity, $keyword_query_string_entity, {limit: $keyword_limit_param_entity})
 YIELD node, score
 WHERE node:Entity
-WITH node, score 
-CALL (node) {
-    MATCH (node)-[r_out:RELATES_TO]->(other_out)
-    RETURN {type: 'RELATES_TO_OUTGOING', label: r_out.relation_label, fact: r_out.fact_sentence, target_node_name: other_out.name, target_node_uuid: other_out.uuid, target_node_labels: labels(other_out)} AS rel_map 
-    LIMIT 3
+WITH node, score                            // node and score are in scope here
+CALL (node) {                               // declare the variable scope
+  MATCH (node)-[r]-(connected_node)         // any direction
+  WHERE elementId(node) <> elementId(connected_node) AND connected_node IS NOT NULL
+  RETURN {
+    direction: CASE
+                 WHEN startNode(r) = node THEN 'OUTGOING'
+                 ELSE 'INCOMING'
+               END,
+    relationship_type: type(r),
+    relationship_properties: properties(r), // Get all properties of the relationship itself
+    connected_node_uuid: connected_node.uuid,
+    connected_node_name: connected_node.name,
+    connected_node_labels: labels(connected_node)
+  } AS rel_detail
+//  LIMIT 10 // Limit the total number of connected facts shown per entity
 }
-WITH node, score, collect(rel_map) AS outgoing_rels_data
-CALL (node) {
-    MATCH (other_in)-[r_in:RELATES_TO]->(node)
-    RETURN {type: 'RELATES_TO_INCOMING', label: r_in.relation_label, fact: r_in.fact_sentence, source_node_name: other_in.name, source_node_uuid: other_in.uuid, source_node_labels: labels(other_in)} AS rel_map 
-    LIMIT 3
-}
-WITH node, score, outgoing_rels_data, collect(rel_map) AS incoming_rels_data
-CALL (node) {
-    MATCH (chunk:Chunk)-[m:MENTIONS]->(node)
-    RETURN {type: 'MENTIONED_IN_CHUNK', fact: m.fact_sentence, mentioning_chunk_name: chunk.name, mentioning_chunk_uuid: chunk.uuid} AS rel_map 
-    LIMIT 3
-}
-WITH node, score, outgoing_rels_data, incoming_rels_data, collect(rel_map) AS mentions_data
-WITH node, score, 
-     (CASE WHEN outgoing_rels_data IS NULL THEN [] ELSE outgoing_rels_data END) +
-     (CASE WHEN incoming_rels_data IS NULL THEN [] ELSE incoming_rels_data END) +
-     (CASE WHEN mentions_data IS NULL THEN [] ELSE mentions_data END) AS all_connected_facts_raw
-WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts, properties(node) AS all_node_properties
-RETURN node.uuid AS uuid, node.name AS name, node.label AS label,
-       score, "keyword_name" AS method_source,
-       all_connected_facts[0..5] AS connected_facts, all_node_properties
+WITH
+  node, score,
+  collect(rel_detail) AS all_rels_data,
+  properties(node)  AS all_node_properties
+RETURN node.uuid AS uuid, 
+       node.name AS name, 
+       node.label AS label,
+       score, 
+       "keyword_name" AS method_source,
+       CASE WHEN all_rels_data IS NULL THEN [] ELSE all_rels_data END AS connected_facts, 
+       all_node_properties
 """
 
 ENTITY_SEARCH_SEMANTIC_NAME_PART = """
@@ -337,149 +337,151 @@ YIELD node, score
 WHERE node:Entity AND score >= $semantic_min_score_entity_name
 WITH node, score
 CALL (node) {
-    MATCH (node)-[r_out:RELATES_TO]->(other_out)
-    RETURN {type: 'RELATES_TO_OUTGOING', label: r_out.relation_label, fact: r_out.fact_sentence, target_node_name: other_out.name, target_node_uuid: other_out.uuid, target_node_labels: labels(other_out)} AS rel_map LIMIT 3
+  MATCH (node)-[r]-(connected_node)
+  WHERE elementId(node) <> elementId(connected_node) AND connected_node IS NOT NULL
+  RETURN {
+    direction: CASE
+                 WHEN startNode(r) = node THEN 'OUTGOING'
+                 ELSE 'INCOMING'
+               END,
+    relationship_type: type(r),
+    relationship_properties: properties(r),
+    connected_node_uuid: connected_node.uuid,
+    connected_node_name: connected_node.name,
+    connected_node_labels: labels(connected_node)
+  } AS rel_detail
+//  LIMIT 10
 }
-WITH node, score, collect(rel_map) AS outgoing_rels_data
-CALL (node) {
-    MATCH (other_in)-[r_in:RELATES_TO]->(node)
-    RETURN {type: 'RELATES_TO_INCOMING', label: r_in.relation_label, fact: r_in.fact_sentence, source_node_name: other_in.name, source_node_uuid: other_in.uuid, source_node_labels: labels(other_in)} AS rel_map LIMIT 3
-}
-WITH node, score, outgoing_rels_data, collect(rel_map) AS incoming_rels_data
-CALL (node) {
-    MATCH (chunk:Chunk)-[m:MENTIONS]->(node)
-    RETURN {type: 'MENTIONED_IN_CHUNK', fact: m.fact_sentence, mentioning_chunk_name: chunk.name, mentioning_chunk_uuid: chunk.uuid} AS rel_map LIMIT 3
-}
-WITH node, score, outgoing_rels_data, incoming_rels_data, collect(rel_map) AS mentions_data
-WITH node, score, 
-     (CASE WHEN outgoing_rels_data IS NULL THEN [] ELSE outgoing_rels_data END) +
-     (CASE WHEN incoming_rels_data IS NULL THEN [] ELSE incoming_rels_data END) +
-     (CASE WHEN mentions_data IS NULL THEN [] ELSE mentions_data END) AS all_connected_facts_raw
-WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts, properties(node) AS all_node_properties
-RETURN node.uuid AS uuid, node.name AS name, node.label AS label, 
-       score, "semantic_name" AS method_source,
-       all_connected_facts[0..5] AS connected_facts, all_node_properties
+WITH
+  node, score,
+  collect(rel_detail) AS all_rels_data,
+  properties(node) AS all_node_properties
+RETURN node.uuid AS uuid, 
+       node.name AS name, 
+       node.label AS label, 
+       score, 
+       "semantic_name" AS method_source,
+       CASE WHEN all_rels_data IS NULL THEN [] ELSE all_rels_data END AS connected_facts, 
+       all_node_properties
 """
 
-# REVERTING TO RADICALLY SIMPLIFIED VERSION
 PRODUCT_SEARCH_KEYWORD_PART = """
-CALL db.index.fulltext.queryNodes($index_name_keyword_product, $keyword_query_string_product, {limit: $keyword_limit_param_product})
+CALL db.index.fulltext.queryNodes(
+  $index_name_keyword_product,
+  $keyword_query_string_product,
+  {limit: $keyword_limit_param_product}
+)
 YIELD node, score
 WHERE node:Product
-RETURN node.uuid AS uuid, node.name AS name, node.content AS content, node.sku AS sku, node.price AS price, score, "keyword_name_content" AS method_source, properties(node) AS all_node_properties 
-"""
+WITH node, score                            // still in scope for next clause
 
-# REVERTING TO RADICALLY SIMPLIFIED VERSION
+CALL (node) {                               // declare the variable scope
+  MATCH (node)-[r]-(connected_node)         // any direction
+  WHERE elementId(node) <> elementId(connected_node) AND connected_node IS NOT NULL
+  RETURN {
+    direction: CASE
+                 WHEN startNode(r) = node THEN 'OUTGOING'
+                 ELSE 'INCOMING'
+               END,
+    relationship_type: type(r),
+    relationship_properties: properties(r), // <--- ADDED THIS LINE to get all relationship properties
+    connected_node_uuid: connected_node.uuid,
+    connected_node_name: connected_node.name,
+    connected_node_labels: labels(connected_node)
+  } AS rel_detail
+//  LIMIT 50 // Limit the total number of connected facts shown per product for brevity
+}
+WITH
+  node, score,
+  collect(rel_detail) AS all_rels_data,
+  properties(node)  AS all_node_properties
+
+RETURN
+  node.uuid   AS uuid,
+  node.name   AS name,
+  node.content AS content,
+  node.sku    AS sku,
+  node.price  AS price,
+  score,
+  "keyword_name_content" AS method_source,
+  all_node_properties,
+  CASE
+    WHEN all_rels_data IS NULL THEN []
+    ELSE all_rels_data
+  END AS connected_facts
+"""
 PRODUCT_SEARCH_SEMANTIC_NAME_PART = """
 CALL db.index.vector.queryNodes($index_name_semantic_product_name, $semantic_limit_product_name, $semantic_embedding_product_name)
 YIELD node, score
 WHERE node:Product AND score >= $semantic_min_score_product_name
-RETURN node.uuid AS uuid, node.name AS name, node.content AS content, node.sku AS sku, node.price AS price, score, "semantic_name" AS method_source, properties(node) AS all_node_properties
+WITH node, score                            // node and score are in scope here
+CALL (node) {                               // declare the variable scope
+  MATCH (node)-[r]-(connected_node)         // any direction
+  WHERE elementId(node) <> elementId(connected_node) AND connected_node IS NOT NULL
+  RETURN {
+    direction: CASE
+                 WHEN startNode(r) = node THEN 'OUTGOING'
+                 ELSE 'INCOMING'
+               END,
+    relationship_type: type(r),
+    relationship_properties: properties(r),
+    connected_node_uuid: connected_node.uuid,
+    connected_node_name: connected_node.name,
+    connected_node_labels: labels(connected_node)
+  } AS rel_detail
+//  LIMIT 50 // Limit the total number of connected facts shown per product for brevity
+}
+WITH
+  node, score,
+  collect(rel_detail) AS all_rels_data,
+  properties(node)  AS all_node_properties
+RETURN node.uuid AS uuid, 
+       node.name AS name, 
+       node.content AS content, 
+       node.sku AS sku, 
+       node.price AS price, 
+       score, 
+       "semantic_name" AS method_source, 
+       all_node_properties,
+       CASE WHEN all_rels_data IS NULL THEN [] ELSE all_rels_data END AS connected_facts
 """
 
-# REVERTING TO RADICALLY SIMPLIFIED VERSION
 PRODUCT_SEARCH_SEMANTIC_CONTENT_PART = """
 CALL db.index.vector.queryNodes($index_name_semantic_product_content, $semantic_limit_product_content, $semantic_embedding_product_content)
 YIELD node, score
 WHERE node:Product AND score >= $semantic_min_score_product_content
-RETURN node.uuid AS uuid, node.name AS name, node.content AS content, node.sku AS sku, node.price AS price, score, "semantic_content" AS method_source, properties(node) AS all_node_properties
+WITH node, score                            // node and score are in scope here
+CALL (node) {                               // declare the variable scope
+  MATCH (node)-[r]-(connected_node)         // any direction
+  WHERE elementId(node) <> elementId(connected_node) AND connected_node IS NOT NULL
+  RETURN {
+    direction: CASE
+                 WHEN startNode(r) = node THEN 'OUTGOING'
+                 ELSE 'INCOMING'
+               END,
+    relationship_type: type(r),
+    relationship_properties: properties(r),
+    connected_node_uuid: connected_node.uuid,
+    connected_node_name: connected_node.name,
+    connected_node_labels: labels(connected_node)
+  } AS rel_detail
+//  LIMIT 50 // Limit the total number of connected facts shown per product for brevity
+}
+WITH
+  node, score,
+  collect(rel_detail) AS all_rels_data,
+  properties(node)  AS all_node_properties
+RETURN node.uuid AS uuid, 
+       node.name AS name, 
+       node.content AS content, 
+       node.sku AS sku, 
+       node.price AS price, 
+       score, 
+       "semantic_content" AS method_source, 
+       all_node_properties,
+       CASE WHEN all_rels_data IS NULL THEN [] ELSE all_rels_data END AS connected_facts
 """
 
-# PRODUCT_SEARCH_KEYWORD_PART = """
-# CALL db.index.fulltext.queryNodes($index_name_keyword_product, $keyword_query_string_product, {limit: $keyword_limit_param_product})
-# YIELD node, score
-# WHERE node:Product
-# WITH node, score
-# CALL (node) {
-#     MATCH (node)-[r_out:RELATES_TO]->(other_out)
-#     RETURN {type: 'RELATES_TO_OUTGOING', label: r_out.relation_label, fact: r_out.fact_sentence, target_node_name: other_out.name, target_node_uuid: other_out.uuid, target_node_labels: labels(other_out)} AS fact_detail
-#     LIMIT 3
-# }
-# WITH node, score, collect(fact_detail) AS outgoing_rels_data
-# CALL (node) {
-#     MATCH (other_in)-[r_in:RELATES_TO]->(node)
-#     RETURN {type: 'RELATES_TO_INCOMING', label: r_in.relation_label, fact: r_in.fact_sentence, source_node_name: other_in.name, source_node_uuid: other_in.uuid, source_node_labels: labels(other_in)} AS fact_detail
-#     LIMIT 3
-# }
-# WITH node, score, outgoing_rels_data, collect(fact_detail) AS incoming_rels_data
-# CALL (node) {
-#     MATCH (chunk:Chunk)-[m:MENTIONS]->(node)
-#     RETURN {type: 'MENTIONED_IN_CHUNK', fact: m.fact_sentence, mentioning_chunk_name: chunk.name, mentioning_chunk_uuid: chunk.uuid} AS fact_detail
-#     LIMIT 3
-# }
-# WITH node, score, outgoing_rels_data, incoming_rels_data, collect(fact_detail) AS mentions_data
-# WITH node, score, 
-#      [item IN outgoing_rels_data WHERE item.type IS NOT NULL] +
-#      [item IN incoming_rels_data WHERE item.type IS NOT NULL] +
-#      [item IN mentions_data WHERE item.type IS NOT NULL] AS all_connected_facts_raw
-# WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL] AS all_connected_facts, properties(node) AS all_node_properties
-# RETURN node.uuid AS uuid, node.name AS name, node.content AS content,
-#        node.sku AS sku, node.price AS price,
-#        score, "keyword_name_content" AS method_source,
-#        all_connected_facts[0..5] AS connected_facts, all_node_properties
-# """
-
-# PRODUCT_SEARCH_SEMANTIC_NAME_PART = """
-# CALL db.index.vector.queryNodes($index_name_semantic_product_name, $semantic_limit_product_name, $semantic_embedding_product_name)
-# YIELD node, score
-# WHERE node:Product AND score >= $semantic_min_score_product_name
-# WITH node, score
-# CALL (node) {
-#     MATCH (node)-[r_out:RELATES_TO]->(other_out)
-#     RETURN {type: 'RELATES_TO_OUTGOING', label: r_out.relation_label, fact: r_out.fact_sentence, target_node_name: other_out.name, target_node_uuid: other_out.uuid, target_node_labels: labels(other_out)} AS fact_detail LIMIT 3
-# }
-# WITH node, score, collect(fact_detail) AS outgoing_rels_data
-# CALL (node) {
-#     MATCH (other_in)-[r_in:RELATES_TO]->(node)
-#     RETURN {type: 'RELATES_TO_INCOMING', label: r_in.relation_label, fact: r_in.fact_sentence, source_node_name: other_in.name, source_node_uuid: other_in.uuid, source_node_labels: labels(other_in)} AS fact_detail LIMIT 3
-# }
-# WITH node, score, outgoing_rels_data, collect(fact_detail) AS incoming_rels_data
-# CALL (node) {
-#     MATCH (chunk:Chunk)-[m:MENTIONS]->(node)
-#     RETURN {type: 'MENTIONED_IN_CHUNK', fact: m.fact_sentence, mentioning_chunk_name: chunk.name, mentioning_chunk_uuid: chunk.uuid} AS fact_detail LIMIT 3
-# }
-# WITH node, score, outgoing_rels_data, incoming_rels_data, collect(fact_detail) AS mentions_data
-# WITH node, score, 
-#      [item IN outgoing_rels_data WHERE item.type IS NOT NULL] +
-#      [item IN incoming_rels_data WHERE item.type IS NOT NULL] +
-#      [item IN mentions_data WHERE item.type IS NOT NULL] AS all_connected_facts_raw
-# WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL] AS all_connected_facts, properties(node) AS all_node_properties
-# RETURN node.uuid AS uuid, node.name AS name, node.content AS content,
-#        node.sku AS sku, node.price AS price,
-#        score, "semantic_name" AS method_source,
-#        all_connected_facts[0..5] AS connected_facts, all_node_properties
-# """
-
-# PRODUCT_SEARCH_SEMANTIC_CONTENT_PART = """
-# CALL db.index.vector.queryNodes($index_name_semantic_product_content, $semantic_limit_product_content, $semantic_embedding_product_content)
-# YIELD node, score
-# WHERE node:Product AND score >= $semantic_min_score_product_content
-# WITH node, score
-# CALL (node) {
-#     MATCH (node)-[r_out:RELATES_TO]->(other_out)
-#     RETURN {type: 'RELATES_TO_OUTGOING', label: r_out.relation_label, fact: r_out.fact_sentence, target_node_name: other_out.name, target_node_uuid: other_out.uuid, target_node_labels: labels(other_out)} AS fact_detail LIMIT 3
-# }
-# WITH node, score, collect(fact_detail) AS outgoing_rels_data
-# CALL (node) {
-#     MATCH (other_in)-[r_in:RELATES_TO]->(node)
-#     RETURN {type: 'RELATES_TO_INCOMING', label: r_in.relation_label, fact: r_in.fact_sentence, source_node_name: other_in.name, source_node_uuid: other_in.uuid, source_node_labels: labels(other_in)} AS fact_detail LIMIT 3
-# }
-# WITH node, score, outgoing_rels_data, collect(fact_detail) AS incoming_rels_data
-# CALL (node) {
-#     MATCH (chunk:Chunk)-[m:MENTIONS]->(node)
-#     RETURN {type: 'MENTIONED_IN_CHUNK', fact: m.fact_sentence, mentioning_chunk_name: chunk.name, mentioning_chunk_uuid: chunk.uuid} AS fact_detail LIMIT 3
-# }
-# WITH node, score, outgoing_rels_data, incoming_rels_data, collect(fact_detail) AS mentions_data
-# WITH node, score, 
-#      [item IN outgoing_rels_data WHERE item.type IS NOT NULL] +
-#      [item IN incoming_rels_data WHERE item.type IS NOT NULL] +
-#      [item IN mentions_data WHERE item.type IS NOT NULL] AS all_connected_facts_raw
-# WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL] AS all_connected_facts, properties(node) AS all_node_properties
-# RETURN node.uuid AS uuid, node.name AS name, node.content AS content,
-#        node.sku AS sku, node.price AS price,
-#        score, "semantic_content" AS method_source,
-#        all_connected_facts[0..5] AS connected_facts, all_node_properties
-# """
 
 RELATIONSHIP_SEARCH_KEYWORD_PART = """
 CALL db.index.fulltext.queryRelationships($index_name_keyword_rel, $keyword_query_string_rel, {limit: $keyword_limit_param_rel})

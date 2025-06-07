@@ -139,8 +139,8 @@ async def main():
 
         # full_search_query = "What is Pooh favourite food?"
         # full_search_query = "What type of cover does Surface Pro have?"
-        # full_search_query = "What is cheaper Surface Pro or Macbook air?"
-        full_search_query = "Apple MacBook Air (M3 Chip)"
+        full_search_query = "What is cheaper Surface Pro or Macbook air?"
+        # full_search_query = "Apple MacBook Air (M3 Chip)"
         # full_search_query = "ASUS ROG Zephyrus G16 (2024 GU605)"
         
         timings["query_embedding_generation (explicit_in_main)"] = 0.0 
@@ -206,15 +206,15 @@ async def main():
                 ],
                 limit=5, 
                 min_results=2, 
-                keyword_fetch_limit=10,
-                semantic_name_fetch_limit=10,
-                semantic_content_fetch_limit=10,
-                min_similarity_score_name=0.4, # Adjusted from 0.1
-                min_similarity_score_content=0.4, # Adjusted from 0.1
+                keyword_fetch_limit=5,
+                semantic_name_fetch_limit=5,
+                semantic_content_fetch_limit=5,
+                min_similarity_score_name=0.65, # Adjusted from 0.1
+                min_similarity_score_content=0.7, # Adjusted from 0.1
                 rrf_k=60
             ),
             mqr_config=MultiQueryConfig( 
-                enabled=False, 
+                enabled=True, 
                 include_original_query=True, # New field: Default is True, explicitly shown
                 max_alternative_questions=3, # Generates up to 2 alternatives
                 # mqr_llm_models=["gpt-4o-mini", "gemini-2.0-flash"]          # New field: None means use main service LLM for MQR
@@ -247,37 +247,85 @@ async def main():
                     for i, item in enumerate(combined_results.items):
                         logger.info(f"  --- Result {i+1} ({item.result_type}, Score: {item.score:.4f}) ---")
                         logger.info(f"    UUID: {item.uuid}")
-                        if item.name: logger.info(f"    Name: {item.name}")
-                        if item.content and item.result_type != "Mention": # Don't log content for Mention as it's the fact_sentence
+                        if item.name: 
+                            logger.info(f"    Name: {item.name}")
+                        
+                        # Content logging (for Chunk, Source, Product)
+                        # Product.content is its textual description.
+                        if item.content and item.result_type in ["Chunk", "Source", "Product"]:
                             logger.info(f"    Content Snippet: {item.content[:100]}...")
-                        if item.fact_sentence: logger.info(f"    Fact: {item.fact_sentence}") # Covers Relationship and Mention
-                        if item.label and item.result_type == "Entity": logger.info(f"    Label: {item.label}") 
-                        if item.source_node_uuid and item.result_type == "Mention": # Specific for Mention
-                             logger.info(f"    Mention Source (Chunk) UUID: {item.source_node_uuid}")
-                        if item.target_node_uuid and item.result_type == "Mention": # Specific for Mention
-                             logger.info(f"    Mention Target (Entity/Product) UUID: {item.target_node_uuid}")
-                        if item.connected_facts and (item.result_type == "Entity" or item.result_type == "Product"):
+                        
+                        # Fact sentence logging (for Relationship, Mention)
+                        if item.fact_sentence and item.result_type in ["Relationship", "Mention"]:
+                             logger.info(f"    Fact: {item.fact_sentence}")
+                        
+                        # Label logging (for Entity)
+                        if item.label and item.result_type == "Entity":
+                             logger.info(f"    Label: {item.label}")
+                        
+                        # Mention specific fields
+                        if item.result_type == "Mention":
+                            if item.source_node_uuid: # This is the Chunk UUID for MENTIONS
+                                logger.info(f"    Mention Source (Chunk) UUID: {item.source_node_uuid}")
+                            if item.target_node_uuid: # This is the Entity/Product UUID mentioned
+                                logger.info(f"    Mention Target (Entity/Product) UUID: {item.target_node_uuid}")
+
+                        # Connected Facts logging (for Entity and Product using the new unified structure)
+                        if item.connected_facts and item.result_type in ["Entity", "Product"]:
                             logger.info(f"    Connected Facts ({len(item.connected_facts)}):")
                             for fact_idx, fact_data in enumerate(item.connected_facts):
                                 if fact_data is None:
-                                    logger.warning(f"      {fact_idx+1}. Encountered a null fact_data object. Skipping.")
+                                    logger.warning(f"      {fact_idx+1}. Encountered a null fact_data object in connected_facts. Skipping.")
                                     continue
-                                fact_type = fact_data.get('type', 'Unknown Type')
-                                fact_label = fact_data.get('label', '') # For RELATES_TO
-                                fact_text = fact_data.get('fact', 'N/A')
+
+                                log_display_parts = [f"      {fact_idx+1}."]
+                                direction = fact_data.get('direction', 'UNKNOWN_DIRECTION')
+                                rel_type_from_query = fact_data.get('relationship_type', 'UNKNOWN_REL_TYPE')
+                                connected_node_name = fact_data.get('connected_node_name', 'Unknown Connected Node')
+                                connected_node_labels = fact_data.get('connected_node_labels', [])
+                                rel_props = fact_data.get('relationship_properties', {})
+
+                                log_display_parts.append(f"[{direction}] --[{rel_type_from_query}]--> '{connected_node_name}' (Labels: {connected_node_labels})")
                                 
-                                if fact_type == 'RELATES_TO_OUTGOING':
-                                    target_name = fact_data.get('target_node_name', 'Unknown Target')
-                                    logger.info(f"      {fact_idx+1}. [{fact_type}] --[{fact_label}]--> {target_name}: \"{fact_text[:70]}...\"")
-                                elif fact_type == 'RELATES_TO_INCOMING':
-                                    source_name = fact_data.get('source_node_name', 'Unknown Source')
-                                    logger.info(f"      {fact_idx+1}. [{fact_type}] <--[{fact_label}]-- {source_name}: \"{fact_text[:70]}...\"")
-                                elif fact_type == 'MENTIONED_IN_CHUNK':
-                                    chunk_name = fact_data.get('mentioning_chunk_name', 'Unknown Chunk')
-                                    logger.info(f"      {fact_idx+1}. [{fact_type}] in '{chunk_name}': \"{fact_text[:70]}...\"")
-                                else:
-                                    logger.info(f"      {fact_idx+1}. [{fact_type}]: {fact_data}") # Fallback
-                        if item.metadata: logger.info(f"    Metadata: {item.metadata}")
+                                fact_sentence_from_rel_props = None
+                                if isinstance(rel_props, dict):
+                                    fact_sentence_from_rel_props = rel_props.get('fact_sentence')
+                                    
+                                    # For RELATES_TO, relation_label is also in rel_props
+                                    if rel_type_from_query == "RELATES_TO" and 'relation_label' in rel_props:
+                                        log_display_parts.append(f"(Rel Label: {rel_props.get('relation_label', 'N/A')})")
+                                
+                                if fact_sentence_from_rel_props:
+                                    log_display_parts.append(f": \"{fact_sentence_from_rel_props[:70]}...\"")
+                                
+                                # Optionally log other simple relationship properties if needed for debugging
+                                # simple_props_to_log = {k: v for k, v in rel_props.items() if isinstance(v, (str, int, float, bool)) and k not in ['fact_sentence', 'fact_embedding', 'uuid', 'relation_label', 'created_at', 'last_seen_at', 'source_chunk_uuid']}
+                                # if simple_props_to_log:
+                                #     log_display_parts.append(f" RelProps: {simple_props_to_log}")
+                                
+                                logger.info(" ".join(log_display_parts))
+                        
+                        if item.metadata:
+                            # Filter out metadata that is already explicitly logged or too verbose for this summary
+                            metadata_to_log = item.metadata.copy()
+                            keys_to_exclude_from_metadata_log = [
+                                'uuid', 'name', 'content', 'description', 'label', 'score', 'result_type', 
+                                'connected_facts', 'fact_sentence', 'source_node_uuid', 'target_node_uuid',
+                                'contributing_methods', 'unnormalized_score', 'normalization_applied', 
+                                'normalization_N_methods', 'normalization_max_score', 
+                                'original_method_source_before_mqr_enhancement', 'inter_query_rrf_score',
+                                # Type-specific keys already handled or part of main display
+                                'source_description', 'chunk_number', # for Chunk
+                                'sku', 'price', # for Product
+                                'target_node_type' # for Mention
+                            ]
+                            # Also exclude any keys ending with _embedding
+                            for key in list(metadata_to_log.keys()): # Iterate over a copy of keys for safe deletion
+                                if key.endswith("_embedding") or key in keys_to_exclude_from_metadata_log:
+                                    del metadata_to_log[key]
+                            
+                            if metadata_to_log: # Only log if there's anything left
+                                logger.info(f"    Metadata: {metadata_to_log}")
                 else:
                     logger.info(f"No combined results found for '{full_search_query}'.")
                 if combined_results.context_snippet:

@@ -865,7 +865,6 @@ class GraphForRAG:
                     item_label_display = f" ({item.label})" if item.label else ""
                     snippet_parts.append(f"*   Entity: {item.name}{item_label_display}")
                     
-                    # Display additional metadata for Entities
                     if item.metadata:
                         entity_meta_added_subheader = False
                         for key, value in item.metadata.items():
@@ -875,16 +874,29 @@ class GraphForRAG:
                                     entity_meta_added_subheader = True
                                 snippet_parts.append(f"        - {key.replace('_', ' ').title()}: {value}")
                                 
-                    facts_for_this_item_added = False
+                    facts_for_this_item_added = False # Reset for each item
                     if item.connected_facts:
                         for fact_data in item.connected_facts:
                             if fact_data is None: continue
-                            fact_text = fact_data.get('fact')
-                            if fact_text and fact_text not in seen_facts_for_snippet:
-                                snippet_parts.append(f"    *   Fact: {fact_text}")
-                                seen_facts_for_snippet.add(fact_text)
+                            # --- Start of modification ---
+                            fact_text_for_snippet = None
+                            # Unified way to get fact_sentence for snippet from relationship_properties
+                            rel_props = fact_data.get('relationship_properties')
+                            if isinstance(rel_props, dict):
+                                fact_text_for_snippet = rel_props.get('fact_sentence')
+                            # --- End of modification ---
+
+                            if fact_text_for_snippet and fact_text_for_snippet not in seen_facts_for_snippet:
+                                snippet_parts.append(f"    *   Fact: {fact_text_for_snippet}")
+                                seen_facts_for_snippet.add(fact_text_for_snippet)
                                 facts_for_this_item_added = True
-                    if not facts_for_this_item_added and not (item.metadata and any(k.lower() not in ['uuid', 'name', 'label', 'contributing_methods', 'unnormalized_score', 'normalization_applied', 'normalization_n_methods', 'normalization_max_score', 'original_method_source_before_mqr_enhancement', 'inter_query_rrf_score', 'created_at', 'updated_at', 'processed_at'] and not k.endswith('_embedding') for k in item.metadata.keys())): # only add if no metadata and no facts
+                    
+                    # This logic is for the snippet, if no specific facts were added above for THIS entity item.
+                    # And no other "Additional Metadata" was added.
+                    if not facts_for_this_item_added and not (item.metadata and any(
+                        k.lower() not in ['uuid', 'name', 'label', 'contributing_methods', 'unnormalized_score', 'normalization_applied', 'normalization_n_methods', 'normalization_max_score', 'original_method_source_before_mqr_enhancement', 'inter_query_rrf_score', 'created_at', 'updated_at', 'processed_at'] and not k.endswith('_embedding') 
+                        for k in item.metadata.keys()
+                    )):
                          snippet_parts.append(f"    *   (No additional connected facts or metadata found for this entity in the current search results)")
                 if entities_added_to_snippet:
                     snippet_parts.append("")
@@ -899,7 +911,7 @@ class GraphForRAG:
                     item_label_display = f" (Category: {product_category_from_metadata})"
                     snippet_parts.append(f"*   Product: {item.name}{item_label_display}")
 
-                    if item.content: # Textual description for Product
+                    if item.content: 
                         snippet_parts.append(f"    *   Description: \"{item.content}\"")
                     
                     if item.metadata:
@@ -911,30 +923,47 @@ class GraphForRAG:
                                     product_meta_added_subheader = True
                                 snippet_parts.append(f"        - {key.replace('_', ' ').title()}: {value}")
                     
-                    facts_for_this_item_added = False
+                    facts_for_this_item_added = False # Reset for each item
                     if item.connected_facts:
                         for fact_data in item.connected_facts:
                             if fact_data is None: continue
-                            fact_text = fact_data.get('fact')
-                            if fact_text and fact_text not in seen_facts_for_snippet:
-                                snippet_parts.append(f"    *   Fact: {fact_text}")
-                                seen_facts_for_snippet.add(fact_text)
+                            # --- Start of modification ---
+                            fact_text_for_snippet = None
+                            # Unified way to get fact_sentence for snippet from relationship_properties
+                            rel_props = fact_data.get('relationship_properties')
+                            if isinstance(rel_props, dict):
+                                fact_text_for_snippet = rel_props.get('fact_sentence')
+                            # --- End of modification ---
+
+                            if fact_text_for_snippet and fact_text_for_snippet not in seen_facts_for_snippet:
+                                snippet_parts.append(f"    *   Fact: {fact_text_for_snippet}")
+                                seen_facts_for_snippet.add(fact_text_for_snippet)
                                 facts_for_this_item_added = True
-                    if not facts_for_this_item_added and not (item.metadata and any(k.lower() not in ['uuid', 'name', 'content', 'category', 'contributing_methods', 'unnormalized_score', 'normalization_applied', 'normalization_n_methods', 'normalization_max_score', 'original_method_source_before_mqr_enhancement', 'inter_query_rrf_score', 'created_at', 'updated_at', 'processed_at'] and not k.endswith('_embedding') for k in item.metadata.keys())) and not item.content : # only add if no metadata, no facts and no description
+                                
+                    # This logic is for the snippet, if no specific facts were added for THIS product item.
+                    # And no "Additional Details/Metadata" or "Description" was added.
+                    if not facts_for_this_item_added and not (item.metadata and any(
+                        k.lower() not in ['uuid', 'name', 'content', 'category', 'contributing_methods', 'unnormalized_score', 'normalization_applied', 'normalization_n_methods', 'normalization_max_score', 'original_method_source_before_mqr_enhancement', 'inter_query_rrf_score', 'created_at', 'updated_at', 'processed_at'] and not k.endswith('_embedding')
+                        for k in item.metadata.keys()
+                    )) and not item.content:
                          snippet_parts.append(f"    *   (No additional description, connected facts or metadata found for this product in the current search results)")
                 if products_added_to_snippet:
                     snippet_parts.append("")
             # 3. Standalone Relationships and Mentions
             additional_facts_added = False
-            if results_by_type["Relationship"] or results_by_type["Mention"]:
-                snippet_parts.append("\nAdditional relevant facts (from direct Relationships/Mentions):")
-                additional_facts_added = True
-
-            for item_type in ["Relationship", "Mention"]:
+            temp_additional_facts_list: List[str] = [] # Store potential facts here first
+            
+            for item_type in ["Relationship", "Mention"]: # Iterate through Relationship then Mention items
                 for item in results_by_type[item_type]:
+                    # These items have a direct .fact_sentence attribute
                     if item.fact_sentence and item.fact_sentence not in seen_facts_for_snippet:
-                        snippet_parts.append(f"- Fact: {item.fact_sentence}") # Simplified prefix
-                        seen_facts_for_snippet.add(item.fact_sentence)
+                        temp_additional_facts_list.append(f"- Fact: {item.fact_sentence}")
+                        seen_facts_for_snippet.add(item.fact_sentence) # Add to seen to avoid duplicates from here too
+            
+            if temp_additional_facts_list: # Only add headline and facts if any were found
+                snippet_parts.append("\nAdditional relevant facts (from direct Relationships/Mentions):")
+                snippet_parts.extend(temp_additional_facts_list)
+                additional_facts_added = True # Set flag as we added something
             
             if additional_facts_added:
                 snippet_parts.append("")
