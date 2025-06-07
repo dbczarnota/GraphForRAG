@@ -137,9 +137,9 @@ async def main():
         # timings["data_existence_check"] = (time.perf_counter() - section_start_time) * 1000
         data_exists = True
 
-        full_search_query = "What is Pooh favourite food?"
+        # full_search_query = "What is Pooh favourite food?"
         # full_search_query = "What type of cover does Surface Pro have?"
-        # full_search_query = "Compare Surface Pro to Macbook air?"
+        full_search_query = "Compare Surface Pro to Macbook air?"
         
         timings["query_embedding_generation (explicit_in_main)"] = 0.0 
         logger.info(f"MAIN: Explicit query embedding generation in main is SKIPPED for this test.")
@@ -222,7 +222,7 @@ async def main():
                 # include_original_query=False,
                 # max_alternative_questions=3 
             ),
-            overall_results_limit=10 
+            overall_results_limit=15 
         )
         
         config_dump_str = comprehensive_search_config.model_dump_json(indent=2, exclude_none=True)
@@ -278,6 +278,16 @@ async def main():
                         if item.metadata: logger.info(f"    Metadata: {item.metadata}")
                 else:
                     logger.info(f"No combined results found for '{full_search_query}'.")
+                if combined_results.context_snippet:
+                    snippet_filename = "context_snippet_output.txt"
+                    try:
+                        with open(snippet_filename, "w", encoding="utf-8") as f:
+                            f.write(combined_results.context_snippet)
+                        logger.info(f"Context snippet saved to '{snippet_filename}'")
+                    except IOError as e:
+                        logger.error(f"Failed to write context snippet to file '{snippet_filename}': {e}")
+                else:
+                    logger.info("No context snippet generated to save.")                    
             else:
                 logger.warning("Skipping search call as no data exists and data setup was not run.")
                 timings["comprehensive_search_call (graph.search)"] = 0.0

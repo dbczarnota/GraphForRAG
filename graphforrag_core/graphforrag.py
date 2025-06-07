@@ -4,6 +4,7 @@ import asyncio
 from typing import Optional, Any, List, Tuple, Dict
 from collections import defaultdict
 import time 
+import json 
 from neo4j import AsyncGraphDatabase, AsyncDriver # type: ignore
 from .embedder_client import EmbedderClient
 from .openai_embedder import OpenAIEmbedder 
@@ -257,10 +258,11 @@ class GraphForRAG:
         query_text: str, 
         config: Optional[SearchConfig] = None
     ) -> CombinedSearchResults:
+        _original_user_query_for_report = query_text # Store the absolute original quer
         search_internal_total_start_time = time.perf_counter()
         if not query_text.strip(): 
             logger.warning("Search query is empty. Returning empty results.")
-            return CombinedSearchResults(query_text=query_text)
+            return CombinedSearchResults(query_text=_original_user_query_for_report)
         
         if config is None: 
             logger.info("No search configuration provided, using default SearchConfig.")
@@ -796,11 +798,157 @@ class GraphForRAG:
         
         final_aggregation_duration = (time.perf_counter() - final_results_aggregation_start_time) * 1000
         logger.info(f"GRAPHFORRAG.search: Final aggregation, min_results, and limiting completed in {final_aggregation_duration:.2f} ms.")
-        # --- End of modification (Step 3.2) ---
+        snippet_generation_start_time = time.perf_counter()
+        snippet_parts: List[str] = []
+        seen_facts_for_snippet: set[str] = set()
+
+        if final_results_list:
+            # snippet_parts.append(f"Here is some context retrieved from the knowledge graph based on your query: '{_original_user_query_for_report}'.\n")
+            pass
+            # Group results by type for structured output
+            results_by_type: Dict[str, List[SearchResultItem]] = defaultdict(list)
+            for item in final_results_list:
+                results_by_type[item.result_type].append(item)
+
+            # 1. Chunks
+            if results_by_type["Chunk"]:
+                snippet_parts.append("\nRelevant text passages (from Chunks):")
+                for item in results_by_type["Chunk"]:
+                    if item.content:
+                        content_full = item.content # Use full content              
+                        chunk_details = [f"- Chunk Content: \"{content_full}\""]
+                        # Display all non-technical metadata for Chunks
+                        for key, value in item.metadata.items():
+                            # More targeted exclusion list for snippet
+                            if key.lower() not in ['uuid', 'contributing_methods', 'unnormalized_score', 
+                                                 'normalization_applied', 'normalization_n_methods', 
+                                                 'normalization_max_score', 
+                                                 'original_method_source_before_mqr_enhancement', 
+                                                 'inter_query_rrf_score',
+                                                 'name', 'content', 'source_description', 'chunk_number',
+                                                 'entity_count', 'relationship_count', 'created_at', 'updated_at', 'processed_at']: # Added new exclusions
+                                chunk_details.append(f"  - {key.replace('_', ' ').title()}: {value}")
+                        snippet_parts.extend(chunk_details)
+                        # --- End of modification ---
+                snippet_parts.append("") # Add a blank line for spacing
+
+            # 1.5. Sources (Added new section)
+            if results_by_type["Source"]:
+                snippet_parts.append("\nRelevant sources:")
+                for item in results_by_type["Source"]:
+                    if item.name: 
+                        # --- Start of modification ---
+                        source_details = [f"- Source Document: {item.name}"]
+                        if item.content:
+                            source_details.append(f"  - Summary/Content: \"{item.content}\"")
+                        
+                        # Display all non-technical metadata for Sources
+                        for key, value in item.metadata.items():
+                             if key.lower() not in ['uuid', 'contributing_methods', 'unnormalized_score', 
+                                                  'normalization_applied', 'normalization_n_methods', 
+                                                  'normalization_max_score', 
+                                                  'original_method_source_before_mqr_enhancement', 
+                                                  'inter_query_rrf_score',
+                                                  'name', 'content',
+                                                  'created_at', 'updated_at', 'processed_at']: # Added new exclusions
+                                source_details.append(f"  - {key.replace('_', ' ').title()}: {value}")
+                        snippet_parts.extend(source_details)
+                snippet_parts.append("") # Add a blank line for spacing
+
+            # 2. Entities and Products (with their connected facts)
+            # Section for Entities
+            entities_added_to_snippet = False
+            if results_by_type["Entity"]:
+                snippet_parts.append("\nKey entities and related information:")
+                entities_added_to_snippet = True
+                for item in results_by_type["Entity"]:
+                    item_label_display = f" ({item.label})" if item.label else ""
+                    snippet_parts.append(f"*   Entity: {item.name}{item_label_display}")
+                    
+                    # Display additional metadata for Entities
+                    if item.metadata:
+                        entity_meta_added_subheader = False
+                        for key, value in item.metadata.items():
+                            if key.lower() not in ['uuid', 'name', 'label', 'contributing_methods', 'unnormalized_score', 'normalization_applied', 'normalization_n_methods', 'normalization_max_score', 'original_method_source_before_mqr_enhancement', 'inter_query_rrf_score', 'created_at', 'updated_at', 'processed_at'] and not key.endswith('_embedding'):
+                                if not entity_meta_added_subheader:
+                                    snippet_parts.append("    *   Additional Metadata:")
+                                    entity_meta_added_subheader = True
+                                snippet_parts.append(f"        - {key.replace('_', ' ').title()}: {value}")
+                                
+                    facts_for_this_item_added = False
+                    if item.connected_facts:
+                        for fact_data in item.connected_facts:
+                            if fact_data is None: continue
+                            fact_text = fact_data.get('fact')
+                            if fact_text and fact_text not in seen_facts_for_snippet:
+                                snippet_parts.append(f"    *   Fact: {fact_text}")
+                                seen_facts_for_snippet.add(fact_text)
+                                facts_for_this_item_added = True
+                    if not facts_for_this_item_added and not (item.metadata and any(k.lower() not in ['uuid', 'name', 'label', 'contributing_methods', 'unnormalized_score', 'normalization_applied', 'normalization_n_methods', 'normalization_max_score', 'original_method_source_before_mqr_enhancement', 'inter_query_rrf_score', 'created_at', 'updated_at', 'processed_at'] and not k.endswith('_embedding') for k in item.metadata.keys())): # only add if no metadata and no facts
+                         snippet_parts.append(f"    *   (No additional connected facts or metadata found for this entity in the current search results)")
+                if entities_added_to_snippet:
+                    snippet_parts.append("")
+
+            # Section for Products
+            products_added_to_snippet = False
+            if results_by_type["Product"]:
+                snippet_parts.append("\nKey products and related information:")
+                products_added_to_snippet = True
+                for item in results_by_type["Product"]:
+                    product_category_from_metadata = item.metadata.get('category', 'N/A') if item.metadata else 'N/A'
+                    item_label_display = f" (Category: {product_category_from_metadata})"
+                    snippet_parts.append(f"*   Product: {item.name}{item_label_display}")
+
+                    if item.content: # Textual description for Product
+                        snippet_parts.append(f"    *   Description: \"{item.content}\"")
+                    
+                    if item.metadata:
+                        product_meta_added_subheader = False
+                        for key, value in item.metadata.items():
+                            if key.lower() not in ['uuid', 'name', 'content', 'category', 'contributing_methods', 'unnormalized_score', 'normalization_applied', 'normalization_n_methods', 'normalization_max_score', 'original_method_source_before_mqr_enhancement', 'inter_query_rrf_score', 'created_at', 'updated_at', 'processed_at'] and not key.endswith('_embedding'):
+                                if not product_meta_added_subheader:
+                                    snippet_parts.append("    *   Additional Details/Metadata:")
+                                    product_meta_added_subheader = True
+                                snippet_parts.append(f"        - {key.replace('_', ' ').title()}: {value}")
+                    
+                    facts_for_this_item_added = False
+                    if item.connected_facts:
+                        for fact_data in item.connected_facts:
+                            if fact_data is None: continue
+                            fact_text = fact_data.get('fact')
+                            if fact_text and fact_text not in seen_facts_for_snippet:
+                                snippet_parts.append(f"    *   Fact: {fact_text}")
+                                seen_facts_for_snippet.add(fact_text)
+                                facts_for_this_item_added = True
+                    if not facts_for_this_item_added and not (item.metadata and any(k.lower() not in ['uuid', 'name', 'content', 'category', 'contributing_methods', 'unnormalized_score', 'normalization_applied', 'normalization_n_methods', 'normalization_max_score', 'original_method_source_before_mqr_enhancement', 'inter_query_rrf_score', 'created_at', 'updated_at', 'processed_at'] and not k.endswith('_embedding') for k in item.metadata.keys())) and not item.content : # only add if no metadata, no facts and no description
+                         snippet_parts.append(f"    *   (No additional description, connected facts or metadata found for this product in the current search results)")
+                if products_added_to_snippet:
+                    snippet_parts.append("")
+            # 3. Standalone Relationships and Mentions
+            additional_facts_added = False
+            if results_by_type["Relationship"] or results_by_type["Mention"]:
+                snippet_parts.append("\nAdditional relevant facts (from direct Relationships/Mentions):")
+                additional_facts_added = True
+
+            for item_type in ["Relationship", "Mention"]:
+                for item in results_by_type[item_type]:
+                    if item.fact_sentence and item.fact_sentence not in seen_facts_for_snippet:
+                        snippet_parts.append(f"- Fact: {item.fact_sentence}") # Simplified prefix
+                        seen_facts_for_snippet.add(item.fact_sentence)
+            
+            if additional_facts_added:
+                snippet_parts.append("")
+
+        generated_context_snippet = "\n".join(snippet_parts) if snippet_parts else None
+        snippet_generation_duration = (time.perf_counter() - snippet_generation_start_time) * 1000
+        logger.info(f"GRAPHFORRAG.search: Context snippet generation took {snippet_generation_duration:.2f} ms.")
+
         
         total_search_internal_duration = (time.perf_counter() - search_internal_total_start_time) * 1000
         logger.info(f"GRAPHFORRAG.search: Total internal execution time {total_search_internal_duration:.2f} ms. Found {len(final_results_list)} combined items.")
-        return CombinedSearchResults(items=final_results_list, query_text=query_text)
+
+        return CombinedSearchResults(items=final_results_list, query_text=_original_user_query_for_report, context_snippet=generated_context_snippet)
+
     
     
     def _apply_inter_query_rrf(

@@ -124,6 +124,7 @@ class SearchResultItem(BaseModel):
 class CombinedSearchResults(BaseModel):
     items: List[SearchResultItem] = Field(default_factory=list)
     query_text: Optional[str] = None
+    context_snippet: Optional[str] = Field(default=None, description="A formatted string combining relevant information from search results, suitable for LLM context.")
     
 class MultiQueryConfig(BaseModel):
     enabled: bool = Field(default=False, description="Whether to enable Multi-Query Retrieval.")

@@ -330,7 +330,7 @@ YIELD node, score
 WHERE node:Chunk
 RETURN node.uuid AS uuid, node.name AS name, node.content AS content, 
        node.source_description AS source_description, node.chunk_number AS chunk_number,
-       score, "keyword" AS method_source
+       score, "keyword" AS method_source, properties(node) AS all_node_properties
 """
 
 CHUNK_SEARCH_SEMANTIC_PART = """
@@ -339,7 +339,7 @@ YIELD node, score
 WHERE node:Chunk AND score >= $semantic_min_similarity_score_param_chunk
 RETURN node.uuid AS uuid, node.name AS name, node.content AS content,
        node.source_description AS source_description, node.chunk_number AS chunk_number,
-       score, "semantic" AS method_source
+       score, "semantic" AS method_source, properties(node) AS all_node_properties
 """
 
 # ENTITY SEARCH PARTS
@@ -347,23 +347,23 @@ ENTITY_SEARCH_KEYWORD_PART = """
 CALL db.index.fulltext.queryNodes($index_name_keyword_entity, $keyword_query_string_entity, {limit: $keyword_limit_param_entity})
 YIELD node, score
 WHERE node:Entity
-WITH node, score // node and score are in scope here
+WITH node, score 
 
-CALL (node) { // Explicitly pass 'node' into the subquery scope
+CALL (node) { 
     MATCH (node)-[r_out:RELATES_TO]->(other_out)
     RETURN {type: 'RELATES_TO_OUTGOING', label: r_out.relation_label, fact: r_out.fact_sentence, target_node_name: other_out.name, target_node_uuid: other_out.uuid, target_node_labels: labels(other_out)} AS rel_map 
     LIMIT 3
 }
 WITH node, score, collect(rel_map) AS outgoing_rels_data
 
-CALL (node) { // Explicitly pass 'node'
+CALL (node) { 
     MATCH (other_in)-[r_in:RELATES_TO]->(node)
     RETURN {type: 'RELATES_TO_INCOMING', label: r_in.relation_label, fact: r_in.fact_sentence, source_node_name: other_in.name, source_node_uuid: other_in.uuid, source_node_labels: labels(other_in)} AS rel_map 
     LIMIT 3
 }
 WITH node, score, outgoing_rels_data, collect(rel_map) AS incoming_rels_data
 
-CALL (node) { // Explicitly pass 'node'
+CALL (node) { 
     MATCH (chunk:Chunk)-[m:MENTIONS]->(node)
     RETURN {type: 'MENTIONED_IN_CHUNK', fact: m.fact_sentence, mentioning_chunk_name: chunk.name, mentioning_chunk_uuid: chunk.uuid} AS rel_map 
     LIMIT 3
@@ -374,11 +374,11 @@ WITH node, score,
      (CASE WHEN outgoing_rels_data IS NULL THEN [] ELSE outgoing_rels_data END) +
      (CASE WHEN incoming_rels_data IS NULL THEN [] ELSE incoming_rels_data END) +
      (CASE WHEN mentions_data IS NULL THEN [] ELSE mentions_data END) AS all_connected_facts_raw
-WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts
+WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts, properties(node) AS all_node_properties
 
 RETURN node.uuid AS uuid, node.name AS name, node.label AS label,
        score, "keyword_name" AS method_source,
-       all_connected_facts[0..5] AS connected_facts
+       all_connected_facts[0..5] AS connected_facts, all_node_properties
 """
 
 ENTITY_SEARCH_SEMANTIC_NAME_PART = """
@@ -409,11 +409,11 @@ WITH node, score,
      (CASE WHEN outgoing_rels_data IS NULL THEN [] ELSE outgoing_rels_data END) +
      (CASE WHEN incoming_rels_data IS NULL THEN [] ELSE incoming_rels_data END) +
      (CASE WHEN mentions_data IS NULL THEN [] ELSE mentions_data END) AS all_connected_facts_raw
-WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts
+WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts, properties(node) AS all_node_properties
 
 RETURN node.uuid AS uuid, node.name AS name, node.label AS label, 
        score, "semantic_name" AS method_source,
-       all_connected_facts[0..5] AS connected_facts
+       all_connected_facts[0..5] AS connected_facts, all_node_properties
 """
 
 # ENTITY_SEARCH_SEMANTIC_DESCRIPTION_PART = """
@@ -449,7 +449,7 @@ CALL db.index.fulltext.queryNodes($index_name_keyword_source, $keyword_query_str
 YIELD node, score
 WHERE node:Source
 RETURN node.uuid AS uuid, node.name AS name, node.content AS content,
-       score, "keyword_content" AS method_source
+       score, "keyword_content" AS method_source, properties(node) AS all_node_properties
 """
 
 SOURCE_SEARCH_SEMANTIC_PART = """
@@ -457,7 +457,7 @@ CALL db.index.vector.queryNodes($index_name_semantic_source_content, $semantic_l
 YIELD node, score
 WHERE node:Source AND score >= $semantic_min_score_source_content
 RETURN node.uuid AS uuid, node.name AS name, node.content AS content,
-       score, "semantic_content" AS method_source
+       score, "semantic_content" AS method_source, properties(node) AS all_node_properties
 """
 
 # --- Product Search Query Parts (New) ---
@@ -490,12 +490,12 @@ WITH node, score,
      (CASE WHEN outgoing_rels_data IS NULL THEN [] ELSE outgoing_rels_data END) +
      (CASE WHEN incoming_rels_data IS NULL THEN [] ELSE incoming_rels_data END) +
      (CASE WHEN mentions_data IS NULL THEN [] ELSE mentions_data END) AS all_connected_facts_raw
-WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts
+WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts, properties(node) AS all_node_properties
 
 RETURN node.uuid AS uuid, node.name AS name, node.content AS content,
        node.sku AS sku, node.price AS price,
        score, "keyword_name_content" AS method_source,
-       all_connected_facts[0..5] AS connected_facts
+       all_connected_facts[0..5] AS connected_facts, all_node_properties
 """
 
 PRODUCT_SEARCH_SEMANTIC_NAME_PART = """
@@ -526,12 +526,12 @@ WITH node, score,
      (CASE WHEN outgoing_rels_data IS NULL THEN [] ELSE outgoing_rels_data END) +
      (CASE WHEN incoming_rels_data IS NULL THEN [] ELSE incoming_rels_data END) +
      (CASE WHEN mentions_data IS NULL THEN [] ELSE mentions_data END) AS all_connected_facts_raw
-WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts
+WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts, properties(node) AS all_node_properties
 
 RETURN node.uuid AS uuid, node.name AS name, node.content AS content,
        node.sku AS sku, node.price AS price,
        score, "semantic_name" AS method_source,
-       all_connected_facts[0..5] AS connected_facts
+       all_connected_facts[0..5] AS connected_facts, all_node_properties
 """
 
 PRODUCT_SEARCH_SEMANTIC_CONTENT_PART = """
@@ -562,12 +562,12 @@ WITH node, score,
      (CASE WHEN outgoing_rels_data IS NULL THEN [] ELSE outgoing_rels_data END) +
      (CASE WHEN incoming_rels_data IS NULL THEN [] ELSE incoming_rels_data END) +
      (CASE WHEN mentions_data IS NULL THEN [] ELSE mentions_data END) AS all_connected_facts_raw
-WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts
+WITH node, score, [item IN all_connected_facts_raw WHERE item IS NOT NULL AND item.type IS NOT NULL] AS all_connected_facts, properties(node) AS all_node_properties
 
 RETURN node.uuid AS uuid, node.name AS name, node.content AS content,
        node.sku AS sku, node.price AS price,
        score, "semantic_content" AS method_source,
-       all_connected_facts[0..5] AS connected_facts
+       all_connected_facts[0..5] AS connected_facts, all_node_properties
 """
 
 # --- Mention Search Query Parts (New) ---

@@ -454,31 +454,64 @@ class SearchManager:
             for contrib in contributions:
                 logger.debug(f"    - Contributed by: {contrib['method']}, Rank: {contrib['rank']}, Orig. Score: {contrib['original_score']:.4f}, RRF Part: {contrib['rrf_contribution']:.6f}")
 
-            item_data_for_pydantic: Dict[str, Any] = {
-                "uuid": uuid_str,
-                "name": primary_data.get("name"),
-                "score": item_final_rrf_score, 
-                "result_type": result_type,
-                "metadata": {
-                    "contributing_methods": contributions 
-                }
+            # Initialize metadata from all_node_properties if available
+            base_metadata = primary_data.get("all_node_properties", {}).copy()
+            
+            # Add RRF contribution details to metadata
+            base_metadata["contributing_methods"] = contributions
+            
+            # Define keys that are either top-level SearchResultItem fields or internal/technical
+            # These will be removed from base_metadata if they came from all_node_properties,
+            # as they are handled separately or shouldn't be in the user-facing metadata.
+            explicit_or_technical_keys = {
+                "uuid", "name", "content", "score", "result_type", "label", 
+                "fact_sentence", "source_node_uuid", "target_node_uuid",
+                "connected_facts", # This is handled at SearchResultItem top level
+                "name_embedding", "content_embedding", "description_embedding", "fact_embedding", # Embeddings
+                "all_node_properties", # The key itself
+                "method_source", # Handled by contributing_methods
+                # Keys specific to Chunk/Source that are already explicitly returned/handled
+                "source_description", "chunk_number", 
+                # Keys specific to Product that are already explicitly returned/handled
+                "sku", "price",
+                # RRF/normalization metadata added later by GraphForRAG.search
+                "unnormalized_score", "normalization_applied", "normalization_N_methods", 
+                "normalization_max_score", "original_method_source_before_mqr_enhancement", 
+                "inter_query_rrf_score"
+            }
+
+            # Clean base_metadata
+            cleaned_metadata = {
+                k: v for k, v in base_metadata.items() if k not in explicit_or_technical_keys
             }
             
-            # Type-specific fields
+            item_data_for_pydantic: Dict[str, Any] = {
+                "uuid": uuid_str,
+                "name": primary_data.get("name"), # Get from primary_data, which might be from node properties
+                "score": item_final_rrf_score, 
+                "result_type": result_type,
+                "metadata": cleaned_metadata # Use the cleaned metadata
+            }
+            
+            # Type-specific fields (ensure these are taken from primary_data which now contains all_node_properties)
             if result_type == "Chunk":
                 item_data_for_pydantic["content"] = primary_data.get("content")
-                item_data_for_pydantic["metadata"].update({
-                    "source_description": primary_data.get("source_description"),
-                    "chunk_number": primary_data.get("chunk_number")
-                })
+                # source_description and chunk_number are often explicit in RETURN, but also in all_node_properties.
+                # If they are in cleaned_metadata, they will appear. If not, SearchResultItem allows them to be None.
+                # For consistency, let's ensure they are in metadata if primary_data has them.
+                if primary_data.get("source_description") is not None: # Check if it was returned by cypher
+                     item_data_for_pydantic["metadata"]["source_description"] = primary_data.get("source_description")
+                if primary_data.get("chunk_number") is not None:
+                     item_data_for_pydantic["metadata"]["chunk_number"] = primary_data.get("chunk_number")
+
             elif result_type == "Entity":
                 item_data_for_pydantic["label"] = primary_data.get("label")
-                if primary_data.get("connected_facts"):
+                if primary_data.get("connected_facts"): # connected_facts is directly from Cypher, not all_node_properties
                     item_data_for_pydantic["connected_facts"] = primary_data.get("connected_facts")
             elif result_type == "Relationship":
                 item_data_for_pydantic["fact_sentence"] = primary_data.get("fact_sentence")
-                item_data_for_pydantic["source_node_uuid"] = primary_data.get("source_entity_uuid") # Note: key in Cypher query
-                item_data_for_pydantic["target_node_uuid"] = primary_data.get("target_entity_uuid") # Note: key in Cypher query
+                item_data_for_pydantic["source_node_uuid"] = primary_data.get("source_entity_uuid") 
+                item_data_for_pydantic["target_node_uuid"] = primary_data.get("target_entity_uuid") 
             elif result_type == "Source": 
                 item_data_for_pydantic["content"] = primary_data.get("content")
             elif result_type == "Product":
@@ -487,7 +520,7 @@ class SearchManager:
                     item_data_for_pydantic["metadata"]["sku"] = primary_data.get("sku")
                 if primary_data.get("price") is not None:
                     item_data_for_pydantic["metadata"]["price"] = primary_data.get("price")
-                if primary_data.get("connected_facts"):
+                if primary_data.get("connected_facts"): # connected_facts is directly from Cypher
                     item_data_for_pydantic["connected_facts"] = primary_data.get("connected_facts")
             elif result_type == "Mention":
                 item_data_for_pydantic["fact_sentence"] = primary_data.get("fact_sentence")
