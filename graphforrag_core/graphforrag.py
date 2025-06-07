@@ -942,12 +942,178 @@ class GraphForRAG:
         generated_context_snippet = "\n".join(snippet_parts) if snippet_parts else None
         snippet_generation_duration = (time.perf_counter() - snippet_generation_start_time) * 1000
         logger.info(f"GRAPHFORRAG.search: Context snippet generation took {snippet_generation_duration:.2f} ms.")
+        # --- Step 5: Collect and Format Source Data References ---
+        source_data_collection_start_time = time.perf_counter()
+        referenced_chunk_uuids: set[str] = set()
+        referenced_product_uuids: set[str] = set()
+        referenced_source_uuids: set[str] = set() # To store UUIDs of sources
 
+        # Helper to add source UUID from a chunk or product UUID
+        async def get_source_uuid_for_item(item_uuid: str, item_label: str) -> Optional[str]:
+            # Product and Chunk nodes have a BELONGS_TO_SOURCE relationship
+            # Source nodes are identified directly.
+            if item_label == "Source": return item_uuid
+
+            query = f"""
+            MATCH (item:{item_label} {{uuid: $item_uuid}})-[:BELONGS_TO_SOURCE]->(s:Source)
+            RETURN s.uuid AS source_uuid
+            UNION
+            MATCH (item:Chunk {{uuid: $item_uuid}})-[:BELONGS_TO_SOURCE]->(s:Source)
+            RETURN s.uuid AS source_uuid
+            """ # Ensures we cover chunks linked by entities/rels if item_label is not Chunk
+            if item_label not in ["Chunk", "Product"]: # Fallback for other types if needed, though less direct
+                # This might be needed if a relationship's source_chunk_uuid points to something other than a Chunk
+                # but for now, assume BELONGS_TO_SOURCE is the primary way.
+                 logger.debug(f"Attempting to find source for non-Chunk/Product item: {item_uuid} with label {item_label}")
+
+
+            db_results, _, _ = await self.driver.execute_query(query, item_uuid=item_uuid, database_=self.database)
+            if db_results and db_results[0] and db_results[0]["source_uuid"]:
+                return db_results[0]["source_uuid"]
+            logger.warning(f"Could not find Source UUID for {item_label} item {item_uuid}")
+            return None
+
+        for item in final_results_list:
+            if item.result_type == "Chunk":
+                referenced_chunk_uuids.add(item.uuid)
+                source_uuid_for_chunk = await get_source_uuid_for_item(item.uuid, "Chunk")
+                if source_uuid_for_chunk: referenced_source_uuids.add(source_uuid_for_chunk)
+
+            elif item.result_type == "Product":
+                referenced_product_uuids.add(item.uuid)
+                source_uuid_for_product = await get_source_uuid_for_item(item.uuid, "Product")
+                if source_uuid_for_product: referenced_source_uuids.add(source_uuid_for_product)
+            
+            elif item.result_type == "Source": # Direct source result
+                referenced_source_uuids.add(item.uuid)
+
+            elif item.result_type == "Entity":
+                if item.connected_facts:
+                    for fact in item.connected_facts:
+                        if fact.get("type") == "MENTIONED_IN_CHUNK" and fact.get("mentioning_chunk_uuid"):
+                            chunk_uuid = fact["mentioning_chunk_uuid"]
+                            referenced_chunk_uuids.add(chunk_uuid)
+                            source_uuid_for_chunk = await get_source_uuid_for_item(chunk_uuid, "Chunk")
+                            if source_uuid_for_chunk: referenced_source_uuids.add(source_uuid_for_chunk)
+            
+            elif item.result_type == "Relationship": # RELATES_TO
+                # metadata might contain source_chunk_uuid
+                source_chunk_uuid_from_rel = item.metadata.get("source_chunk_uuid") # source_chunk_uuid on RELATES_TO
+                if not source_chunk_uuid_from_rel and item.source_node_uuid: # Fallback if source_node_uuid is chunk-like for some reason
+                    # This is less likely for RELATES_TO, usually source_node_uuid is an Entity/Product
+                    pass
+                if source_chunk_uuid_from_rel:
+                    referenced_chunk_uuids.add(source_chunk_uuid_from_rel)
+                    source_uuid_for_chunk = await get_source_uuid_for_item(source_chunk_uuid_from_rel, "Chunk")
+                    if source_uuid_for_chunk: referenced_source_uuids.add(source_uuid_for_chunk)
+
+
+            elif item.result_type == "Mention": # MENTIONS relationship
+                if item.source_node_uuid: # This is the Chunk UUID for MENTIONS
+                    referenced_chunk_uuids.add(item.source_node_uuid)
+                    source_uuid_for_chunk = await get_source_uuid_for_item(item.source_node_uuid, "Chunk")
+                    if source_uuid_for_chunk: referenced_source_uuids.add(source_uuid_for_chunk)
+        
+        source_data_references_list: List[SearchResultItem] = []
+        
+        # Fetch and format Source nodes
+        if referenced_source_uuids:
+            # Query to fetch full Source nodes
+            source_nodes_query = "MATCH (s:Source) WHERE s.uuid IN $uuids RETURN properties(s) as props, s.uuid as uuid, s.name as name, s.content as content"
+            source_db_results, _, _ = await self.driver.execute_query(source_nodes_query, uuids=list(referenced_source_uuids), database_=self.database)
+            for record in source_db_results:
+                props = record["props"]
+                source_data_references_list.append(SearchResultItem(
+                    uuid=record["uuid"], name=record["name"], content=record["content"],
+                    score=1.0, result_type="Source", metadata=props
+                ))
+
+        # Fetch and format Chunk nodes
+        if referenced_chunk_uuids:
+            chunk_nodes_query = "MATCH (c:Chunk) WHERE c.uuid IN $uuids RETURN properties(c) as props, c.uuid as uuid, c.name as name, c.content as content"
+            chunk_db_results, _, _ = await self.driver.execute_query(chunk_nodes_query, uuids=list(referenced_chunk_uuids), database_=self.database)
+            for record in chunk_db_results:
+                props = record["props"]
+                source_data_references_list.append(SearchResultItem(
+                    uuid=record["uuid"], name=record["name"], content=record["content"],
+                    score=1.0, result_type="Chunk", metadata=props
+                ))
+
+        # Fetch and format Product nodes
+        if referenced_product_uuids:
+            product_nodes_query = "MATCH (p:Product) WHERE p.uuid IN $uuids RETURN properties(p) as props, p.uuid as uuid, p.name as name, p.content as content" # content is description
+            product_db_results, _, _ = await self.driver.execute_query(product_nodes_query, uuids=list(referenced_product_uuids), database_=self.database)
+            for record in product_db_results:
+                props = record["props"]
+                source_data_references_list.append(SearchResultItem(
+                    uuid=record["uuid"], name=record["name"], content=record["content"], # Product's text description
+                    score=1.0, result_type="Product", metadata=props # All other props in metadata
+                ))
+        
+        # Deduplicate source_data_references_list just in case (though UUID sets should handle most of it)
+        final_source_data_references_map: Dict[str, SearchResultItem] = {}
+        for s_item in source_data_references_list:
+            if s_item.uuid not in final_source_data_references_map:
+                 final_source_data_references_map[s_item.uuid] = s_item
+        
+        final_source_data_references = list(final_source_data_references_map.values())
+
+        # Generate source_data_snippet
+        source_snippet_parts: List[str] = []
+        if final_source_data_references:
+            source_snippet_parts.append("Detailed Source Data References:\n")
+            
+            sources_in_snippet = [item for item in final_source_data_references if item.result_type == "Source"]
+            chunks_in_snippet = [item for item in final_source_data_references if item.result_type == "Chunk"]
+            products_in_snippet = [item for item in final_source_data_references if item.result_type == "Product"]
+
+            if sources_in_snippet:
+                source_snippet_parts.append("\nReferenced Sources:")
+                for item in sorted(list(sources_in_snippet), key=lambda x: x.name or ""):
+                    source_details = [f"- Source Document: {item.name}"]
+                    if item.content: source_details.append(f"  - Summary/Content: \"{item.content}\"")
+                    for key, value in item.metadata.items():
+                        if key.lower() not in ['uuid', 'name', 'content', 'created_at', 'updated_at', 'processed_at'] and not key.endswith('_embedding'):
+                            source_details.append(f"  - {key.replace('_', ' ').title()}: {value}")
+                    source_snippet_parts.extend(source_details)
+                source_snippet_parts.append("")
+
+            if chunks_in_snippet:
+                source_snippet_parts.append("\nReferenced Chunks:")
+                for item in sorted(list(chunks_in_snippet), key=lambda x: (x.metadata.get('source_description', ""), x.metadata.get('chunk_number', 0))):
+                    chunk_details = [f"- Chunk: {item.name or item.uuid}"]
+                    if item.content: chunk_details.append(f"  - Content: \"{item.content}\"")
+                    for key, value in item.metadata.items():
+                         if key.lower() not in ['uuid', 'name', 'content', 'created_at', 'updated_at', 'processed_at', 'entity_count', 'relationship_count'] and not key.endswith('_embedding'):
+                            chunk_details.append(f"  - {key.replace('_', ' ').title()}: {value}")
+                    source_snippet_parts.extend(chunk_details)
+                source_snippet_parts.append("")
+            
+            if products_in_snippet:
+                source_snippet_parts.append("\nReferenced Products:")
+                for item in sorted(list(products_in_snippet), key=lambda x: x.name or ""):
+                    prod_details = [f"- Product: {item.name}"]
+                    if item.content: prod_details.append(f"  - Description: \"{item.content}\"") # Product.content is textual description
+                    for key, value in item.metadata.items():
+                        if key.lower() not in ['uuid', 'name', 'content', 'created_at', 'updated_at', 'processed_at'] and not key.endswith('_embedding'):
+                            prod_details.append(f"  - {key.replace('_', ' ').title()}: {value}")
+                    source_snippet_parts.extend(prod_details)
+                source_snippet_parts.append("")
+
+        generated_source_data_snippet = "\n".join(source_snippet_parts) if source_snippet_parts else None
+        source_data_collection_duration = (time.perf_counter() - source_data_collection_start_time) * 1000
+        logger.info(f"GRAPHFORRAG.search: Source data reference collection & snippet generation took {source_data_collection_duration:.2f} ms. Found {len(final_source_data_references)} unique source items.")
         
         total_search_internal_duration = (time.perf_counter() - search_internal_total_start_time) * 1000
         logger.info(f"GRAPHFORRAG.search: Total internal execution time {total_search_internal_duration:.2f} ms. Found {len(final_results_list)} combined items.")
 
-        return CombinedSearchResults(items=final_results_list, query_text=_original_user_query_for_report, context_snippet=generated_context_snippet)
+        return CombinedSearchResults(
+            items=final_results_list, 
+            query_text=_original_user_query_for_report, 
+            context_snippet=generated_context_snippet,
+            source_data_references=final_source_data_references, # ADDED
+            source_data_snippet=generated_source_data_snippet    # ADDED
+        )
 
     
     

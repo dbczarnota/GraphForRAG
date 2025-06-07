@@ -77,7 +77,7 @@ async def main():
         # Define ingestion config (example)
         ingestion_llm_config = IngestionConfig(
             ingestion_llm_models=["gpt-4.1-mini", "gemini-2.0-flash"],
-            extractable_entity_labels=["Product", "Brand", "Concept", "Company", "Person/Character", "Location"] # Example: Use only gpt-4o-mini for all ingestion tasks
+            # extractable_entity_labels=["Product", "Brand", "Concept", "Company", "Person/Character", "Location"] # Example: Use only gpt-4o-mini for all ingestion tasks
             # ingestion_llm_models=[] # Example: Use setup_fallback_model's defaults for ingestion
             # ingestion_llm_models=None # Example: Use general LLM passed to G4R, or setup_fallback_model defaults if that was None
         )
@@ -139,7 +139,9 @@ async def main():
 
         # full_search_query = "What is Pooh favourite food?"
         # full_search_query = "What type of cover does Surface Pro have?"
-        full_search_query = "Compare Surface Pro to Macbook air?"
+        # full_search_query = "What is cheaper Surface Pro or Macbook air?"
+        full_search_query = "Apple MacBook Air (M3 Chip)"
+        # full_search_query = "ASUS ROG Zephyrus G16 (2024 GU605)"
         
         timings["query_embedding_generation (explicit_in_main)"] = 0.0 
         logger.info(f"MAIN: Explicit query embedding generation in main is SKIPPED for this test.")
@@ -202,20 +204,20 @@ async def main():
                     ProductSearchMethod.SEMANTIC_NAME,
                     ProductSearchMethod.SEMANTIC_CONTENT
                 ],
-                limit=3, 
-                min_results=1, 
+                limit=5, 
+                min_results=2, 
                 keyword_fetch_limit=10,
                 semantic_name_fetch_limit=10,
                 semantic_content_fetch_limit=10,
-                min_similarity_score_name=0.7,
-                min_similarity_score_content=0.65, 
+                min_similarity_score_name=0.4, # Adjusted from 0.1
+                min_similarity_score_content=0.4, # Adjusted from 0.1
                 rrf_k=60
             ),
             mqr_config=MultiQueryConfig( 
-                enabled=True, 
+                enabled=False, 
                 include_original_query=True, # New field: Default is True, explicitly shown
-                max_alternative_questions=2, # Generates up to 2 alternatives
-                mqr_llm_models=["gpt-4o-mini", "gemini-2.0-flash"]          # New field: None means use main service LLM for MQR
+                max_alternative_questions=3, # Generates up to 2 alternatives
+                # mqr_llm_models=["gpt-4o-mini", "gemini-2.0-flash"]          # New field: None means use main service LLM for MQR
                 # Example: Use specific models for MQR generation
                 # mqr_llm_models=["gpt-4o-mini", "gemini-2.0-flash"] 
                 # Example: Exclude original, only use alternatives (if any generated)
@@ -287,7 +289,18 @@ async def main():
                     except IOError as e:
                         logger.error(f"Failed to write context snippet to file '{snippet_filename}': {e}")
                 else:
-                    logger.info("No context snippet generated to save.")                    
+                    logger.info("No context snippet generated to save.")   
+                # Save source_data_snippet to file
+                if combined_results.source_data_snippet:
+                    source_snippet_filename = "source_references_snippet.txt"
+                    try:
+                        with open(source_snippet_filename, "w", encoding="utf-8") as f:
+                            f.write(combined_results.source_data_snippet)
+                        logger.info(f"Source data references snippet saved to '{source_snippet_filename}'")
+                    except IOError as e:
+                        logger.error(f"Failed to write source data references snippet to file '{source_snippet_filename}': {e}")
+                else:
+                    logger.info("No source data references snippet generated to save.")                 
             else:
                 logger.warning("Skipping search call as no data exists and data setup was not run.")
                 timings["comprehensive_search_call (graph.search)"] = 0.0

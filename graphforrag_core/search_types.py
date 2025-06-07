@@ -125,7 +125,10 @@ class CombinedSearchResults(BaseModel):
     items: List[SearchResultItem] = Field(default_factory=list)
     query_text: Optional[str] = None
     context_snippet: Optional[str] = Field(default=None, description="A formatted string combining relevant information from search results, suitable for LLM context.")
+    source_data_references: Optional[List[SearchResultItem]] = Field(default=None, description="A list of unique Source, Chunk, and Product nodes that contributed to the main search results.")
+    source_data_snippet: Optional[str] = Field(default=None, description="A textual snippet derived from the source_data_references.")
     
+        
 class MultiQueryConfig(BaseModel):
     enabled: bool = Field(default=False, description="Whether to enable Multi-Query Retrieval.")
     include_original_query: bool = Field(

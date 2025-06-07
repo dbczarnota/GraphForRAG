@@ -640,24 +640,42 @@ class SearchManager:
         # semantic_content_part_included = False # Old
 
         if ProductSearchMethod.KEYWORD_NAME_CONTENT in config.search_methods and query_text.strip():
-            lucene_query_str = construct_lucene_query(query_text)
-            if lucene_query_str:
+            
+            # lucene_query_str = query_text # TEMPORARY: Use raw query_text
+            # logger.warning(f"TEMP DEBUG: Using RAW query text for Lucene: '{lucene_query_str}'")
+            escaped_query_text = construct_lucene_query(query_text)
+            lucene_query_str_for_product: str
+            if " " in query_text.strip() or any(c in query_text for c in "()[]{}<>/"): # Add more chars if needed
+                 # Ensure internal quotes within the escaped_query_text are themselves escaped for the outer phrase quotes
+                 # For example, if escaped_query_text becomes 'Product \"X\"', for phrase it should be '"Product \\"X\\""'
+                 # However, construct_lucene_query already escapes double quotes to \\"
+                 # So, simply wrapping should be fine if construct_lucene_query handles internal quotes correctly for Lucene.
+                 lucene_query_str_for_product = f"\"{escaped_query_text}\""
+                 logger.debug(f"Product Keyword Search: Using PHRASE query for '{query_text[:50]}...': {lucene_query_str_for_product}")
+            else:
+                 lucene_query_str_for_product = escaped_query_text
+                 logger.debug(f"Product Keyword Search: Using standard Lucene query for '{query_text[:50]}...': {lucene_query_str_for_product}")
+            if lucene_query_str_for_product:
                 keyword_params = {
-                    "keyword_query_string_product": lucene_query_str,
+                    "keyword_query_string_product": lucene_query_str_for_product,
                     "keyword_limit_param_product": config.keyword_fetch_limit,
                     "index_name_keyword_product": "product_name_content_ft"
                 }
                 try:
-                    logger.debug(f"_fetch_products_combined (KeywordNameContent): Executing. Query:\n{cypher_queries.PRODUCT_SEARCH_KEYWORD_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in keyword_params.items()} }")
+                    logger.debug(f"_fetch_products_combined (KeywordNameContent) for query '{query_text[:50]}...': Executing. Query:\n{cypher_queries.PRODUCT_SEARCH_KEYWORD_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in keyword_params.items()} }") # Log query
                     fetch_start_time_kw = time.perf_counter()
                     keyword_db_results, _, _ = await self.driver.execute_query(
                         cypher_queries.PRODUCT_SEARCH_KEYWORD_PART, keyword_params, database_=self.database
                     )
                     fetch_duration_kw = (time.perf_counter() - fetch_start_time_kw) * 1000
-                    logger.debug(f"_fetch_products_combined (KeywordNameContent): DB query took {fetch_duration_kw:.2f} ms. Rows: {len(keyword_db_results)}")
                     results_by_method["keyword_name_content"] = [dict(record) for record in keyword_db_results]
+                    # --- Start of new code ---
+                    kw_found_products = [(r.get('uuid'), r.get('name'), r.get('score')) for r in results_by_method["keyword_name_content"]]
+                    logger.info(f"DEBUG ProductFetch: Keyword for '{query_text[:50]}...' FOUND: {len(kw_found_products)} products. Details: {kw_found_products}")
+                    # --- End of new code ---
+                    logger.debug(f"_fetch_products_combined (KeywordNameContent): DB query took {fetch_duration_kw:.2f} ms. Rows: {len(keyword_db_results)}")
                 except Exception as e_kw:
-                    logger.error(f"Error during _fetch_products_combined (KeywordNameContent): {e_kw}", exc_info=True)
+                    logger.error(f"Error during _fetch_products_combined (KeywordNameContent) for query '{query_text[:50]}...': {e_kw}", exc_info=True) # Log query
                     results_by_method["keyword_name_content"] = []
             else:
                 logger.debug("_fetch_products_combined (KeywordNameContent): Skipped due to empty Lucene query.")
@@ -665,6 +683,7 @@ class SearchManager:
 
 
         if ProductSearchMethod.SEMANTIC_NAME in config.search_methods and query_embedding:
+            logger.info(f"DEBUG ProductFetch: SemanticName for '{query_text[:50]}...' using query_embedding (first 5 dims): {query_embedding[:5] if query_embedding else 'None'}")
             semantic_name_params = {
                 "semantic_embedding_product_name": query_embedding,
                 "semantic_limit_product_name": config.semantic_name_fetch_limit,
@@ -672,19 +691,23 @@ class SearchManager:
                 "index_name_semantic_product_name": "product_name_embedding_vector"
             }
             try:
-                logger.debug(f"_fetch_products_combined (SemanticName): Executing. Query:\n{cypher_queries.PRODUCT_SEARCH_SEMANTIC_NAME_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in semantic_name_params.items()} }")
+                logger.debug(f"_fetch_products_combined (SemanticName) for query '{query_text[:50]}...': Executing. Query:\n{cypher_queries.PRODUCT_SEARCH_SEMANTIC_NAME_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in semantic_name_params.items()} }") # Log query
                 fetch_start_time_sem_name = time.perf_counter()
                 semantic_name_db_results, _, _ = await self.driver.execute_query(
                     cypher_queries.PRODUCT_SEARCH_SEMANTIC_NAME_PART, semantic_name_params, database_=self.database
                 )
                 fetch_duration_sem_name = (time.perf_counter() - fetch_start_time_sem_name) * 1000
-                logger.debug(f"_fetch_products_combined (SemanticName): DB query took {fetch_duration_sem_name:.2f} ms. Rows: {len(semantic_name_db_results)}")
                 results_by_method["semantic_name"] = [dict(record) for record in semantic_name_db_results]
+                # --- Start of new code ---
+                sem_name_found_products = [(r.get('uuid'), r.get('name'), r.get('score')) for r in results_by_method["semantic_name"]]
+                logger.info(f"DEBUG ProductFetch: SemanticName for '{query_text[:50]}...' FOUND: {len(sem_name_found_products)} products. Details: {sem_name_found_products}")
+                # --- End of new code ---
+                logger.debug(f"_fetch_products_combined (SemanticName): DB query took {fetch_duration_sem_name:.2f} ms. Rows: {len(semantic_name_db_results)}")
             except Exception as e_sem_name:
-                logger.error(f"Error during _fetch_products_combined (SemanticName): {e_sem_name}", exc_info=True)
+                logger.error(f"Error during _fetch_products_combined (SemanticName) for query '{query_text[:50]}...': {e_sem_name}", exc_info=True) # Log query
                 results_by_method["semantic_name"] = []
         else:
-            logger.debug("_fetch_products_combined (SemanticName): Skipped (no embedding or not in config).")
+            logger.debug(f"_fetch_products_combined (SemanticName) for query '{query_text[:50]}...': Skipped (no embedding or not in config).") # Log query
             if ProductSearchMethod.SEMANTIC_NAME in config.search_methods:
                  results_by_method["semantic_name"] = []
 
@@ -697,39 +720,39 @@ class SearchManager:
                 "index_name_semantic_product_content": "product_content_embedding_vector"
             }
             try:
-                logger.debug(f"_fetch_products_combined (SemanticContent): Executing. Query:\n{cypher_queries.PRODUCT_SEARCH_SEMANTIC_CONTENT_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in semantic_content_params.items()} }")
+                logger.debug(f"_fetch_products_combined (SemanticContent) for query '{query_text[:50]}...': Executing. Query:\n{cypher_queries.PRODUCT_SEARCH_SEMANTIC_CONTENT_PART}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in semantic_content_params.items()} }") # Log query
                 fetch_start_time_sem_content = time.perf_counter()
                 semantic_content_db_results, _, _ = await self.driver.execute_query(
                     cypher_queries.PRODUCT_SEARCH_SEMANTIC_CONTENT_PART, semantic_content_params, database_=self.database
                 )
                 fetch_duration_sem_content = (time.perf_counter() - fetch_start_time_sem_content) * 1000
-                logger.debug(f"_fetch_products_combined (SemanticContent): DB query took {fetch_duration_sem_content:.2f} ms. Rows: {len(semantic_content_db_results)}")
                 results_by_method["semantic_content"] = [dict(record) for record in semantic_content_db_results]
+                # --- Start of new code ---
+                sem_content_found_products = [(r.get('uuid'), r.get('name'), r.get('score')) for r in results_by_method["semantic_content"]]
+                logger.info(f"DEBUG ProductFetch: SemanticContent for '{query_text[:50]}...' FOUND: {len(sem_content_found_products)} products. Details: {sem_content_found_products}")
+                # --- End of new code ---
+                logger.debug(f"_fetch_products_combined (SemanticContent): DB query took {fetch_duration_sem_content:.2f} ms. Rows: {len(semantic_content_db_results)}")
             except Exception as e_sem_content:
-                logger.error(f"Error during _fetch_products_combined (SemanticContent): {e_sem_content}", exc_info=True)
+                logger.error(f"Error during _fetch_products_combined (SemanticContent) for query '{query_text[:50]}...': {e_sem_content}", exc_info=True) # Log query
                 results_by_method["semantic_content"] = []
         else:
-            logger.debug("_fetch_products_combined (SemanticContent): Skipped (no embedding or not in config).")
+            logger.debug(f"_fetch_products_combined (SemanticContent) for query '{query_text[:50]}...': Skipped (no embedding or not in config).") # Log query
             if ProductSearchMethod.SEMANTIC_CONTENT in config.search_methods:
                  results_by_method["semantic_content"] = []
 
-        logger.debug(f"_fetch_products_combined: Returning results by method: { {k: len(v) for k,v in results_by_method.items()} }")
+        logger.debug(f"_fetch_products_combined for query '{query_text[:50]}...': Returning results by method: { {k: len(v) for k,v in results_by_method.items()} }") # Log query
         return results_by_method
-            
-    async def search_products(self, query_text: str, config: ProductSearchConfig, query_embedding: Optional[List[float]] = None) -> Dict[str, List[Dict[str, Any]]]: # MODIFIED return type
+    
+    async def search_products(self, query_text: str, config: ProductSearchConfig, query_embedding: Optional[List[float]] = None) -> Dict[str, List[Dict[str, Any]]]:
         start_time = time.perf_counter()
         logger.info(f"SearchManager: Fetching product data for query: '{query_text}' (will be RRF'd later if applicable)")
         
-        # --- Start of modification ---
         fetched_results_by_method: Dict[str, List[Dict[str, Any]]] = await self._fetch_products_combined(
             query_text, config, query_embedding
         )
 
-        # RRF logic and SearchResultItem creation removed.
-        
         duration = (time.perf_counter() - start_time) * 1000
         method_counts = {method: len(results) for method, results in fetched_results_by_method.items()}
         logger.info(f"SearchManager: Product data fetching for '{query_text}' completed in {duration:.2f} ms. Results per method: {method_counts}")
         
         return fetched_results_by_method
-    
