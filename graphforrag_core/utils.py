@@ -49,3 +49,5 @@ def normalize_entity_name(name: str) -> str:
     # Example of replacing multiple spaces with a single space
     # normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
+
+
