@@ -309,6 +309,6 @@ def get_schema(uri: str | None = None, user: str | None = None, password: str | 
     kg = Neo4jGraph(url=neo4j_uri, username=neo4j_user, password=neo4j_password)
 
     kg.refresh_schema()
-    logger.info("SCHEMA:")
-    logger.info(textwrap.fill(kg.schema, 60))
+ 
+    logger.info(f"SCHEMA: {textwrap.fill(kg.schema, 60)}")
     return kg.schema
