@@ -179,6 +179,10 @@ class GraphForRAG:
 
     async def clear_all_known_indexes_and_constraints(self):
         await self.schema_manager.clear_all_known_indexes_and_constraints()
+
+    async def get_schema(self) -> str:
+        """Return a textual description of the current graph schema."""
+        return await self.schema_manager.get_schema()
     
     async def add_documents_from_source(
         self,
