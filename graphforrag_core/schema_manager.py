@@ -4,8 +4,10 @@ import re
 from neo4j import AsyncDriver # type: ignore
 from config import cypher_queries # Import the whole module
 from .embedder_client import EmbedderClient
+
 import textwrap
 from typing import Any, Dict, List
+
 
 logger = logging.getLogger("graph_for_rag.schema")
 
@@ -341,3 +343,4 @@ class SchemaManager:
         logger.info("SCHEMA:")
         logger.info(textwrap.fill(schema_text, 60))
         return schema_text
+
