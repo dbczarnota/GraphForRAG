@@ -3,7 +3,11 @@ import logging
 import re
 from neo4j import AsyncDriver # type: ignore
 from config import cypher_queries # Import the whole module
-from .embedder_client import EmbedderClient 
+from .embedder_client import EmbedderClient
+from dotenv import load_dotenv
+import os
+import textwrap
+from langchain_neo4j import Neo4jGraph
 
 logger = logging.getLogger("graph_for_rag.schema")
 
@@ -278,3 +282,33 @@ class SchemaManager:
                 except Exception as e:
                     logger.warning(f"Potentially ignorable error dropping index/constraint with query '{query_string.strip()}': {e}", exc_info=False)
         logger.info("Finished attempting to drop known indexes and constraints.")
+
+
+def get_schema(uri: str | None = None, user: str | None = None, password: str | None = None) -> str | None:
+    """Retrieve the Neo4j database schema using ``Neo4jGraph.refresh_schema``.
+
+    Parameters override the corresponding ``NEO4J_*`` environment variables if
+    provided. The ``.env`` file is loaded to allow local configuration.
+
+    Returns the schema string or ``None`` when the schema could not be
+    retrieved (for example when ``OPENAI_API_KEY`` is missing).
+    """
+    load_dotenv()
+
+    neo4j_uri = uri or os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+    neo4j_user = user or os.environ.get("NEO4J_USER", "neo4j")
+    neo4j_password = password or os.environ.get("NEO4J_PASSWORD", "password")
+
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_api_key:
+        logger.error(
+            "OPENAI_API_KEY not found in environment variables. Cannot initialize OpenAIEmbedder."
+        )
+        return None
+
+    kg = Neo4jGraph(url=neo4j_uri, username=neo4j_user, password=neo4j_password)
+
+    kg.refresh_schema()
+    logger.info("SCHEMA:")
+    logger.info(textwrap.fill(kg.schema, 60))
+    return kg.schema
