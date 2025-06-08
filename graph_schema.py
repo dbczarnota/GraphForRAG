@@ -33,7 +33,7 @@ async def main():
 
     kg = Neo4jGraph(url=NEO4J_URI, username=NEO4J_USER, password=NEO4J_PASSWORD)
 
-    # kg.refresh_schema()
+    kg.refresh_schema()
     logger.info("SCHEMA:")
     logger.info(textwrap.fill(kg.schema, 60))
     
