@@ -253,6 +253,16 @@ class GraphForRAG:
         logger.info(f"GraphForRAG: Orphaned entity cleanup complete. Deleted {deleted_count} entities.")
         return deleted_count
     
+    async def get_schema(self) -> str:
+        """
+        Retrieves and formats the database schema string using the SchemaManager.
+        """
+        if not self.schema_manager:
+            logger.error("SchemaManager not initialized in GraphForRAG. Cannot get schema.")
+            return "Error: SchemaManager not available."
+        return await self.schema_manager.get_schema_string()    
+    
+    
     async def search(
         self, 
         query_text: str, 

@@ -8,7 +8,8 @@ from rich import traceback
 from rich.logging import RichHandler
 import textwrap
 import asyncio
-from graphforrag_core.schema_manager import get_schema
+from graphforrag_core.graphforrag import GraphForRAG
+from graphforrag_core.openai_embedder import OpenAIEmbedder, OpenAIEmbedderConfig
 
 logging.basicConfig(
     level=logging.INFO, 
@@ -59,15 +60,28 @@ async def main():
         logger.error("OPENAI_API_KEY not found in environment variables. Cannot initialize OpenAIEmbedder.")
         return
 
-    kg = Neo4jGraph(url=NEO4J_URI, username=NEO4J_USER, password=NEO4J_PASSWORD)
+    graph_for_rag_instance = None # For finally block
+    try:
+        # Setup embedder for GraphForRAG initialization
+        embedder_config = OpenAIEmbedderConfig(api_key=OPENAI_API_KEY) # Default or your specific config
+        openai_embedder = OpenAIEmbedder(config=embedder_config)
 
-    kg.refresh_schema()
-    logger.info("SCHEMA:")
-    logger.info(textwrap.fill(kg.schema, 60))
-    
-    schema = get_schema(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD)
-    logger.info("SCHEMA2:")
-    logger.info(schema)
+        graph_for_rag_instance = GraphForRAG(
+            uri=NEO4J_URI,
+            user=NEO4J_USER,
+            password=NEO4J_PASSWORD,
+            embedder_client=openai_embedder # Pass the embedder
+        )
+        
+        logger.info("SCHEMA (from GraphForRAG.get_schema()):")
+        schema_string = await graph_for_rag_instance.get_schema()
+        logger.info(textwrap.fill(schema_string, 120)) # Wider fill for potentially long lines
+
+    except Exception as e_main:
+        logger.error(f"An error occurred in graph_schema.py main: {e_main}", exc_info=True)
+    finally:
+        if graph_for_rag_instance:
+            await graph_for_rag_instance.close()
     
     
 if __name__ == "__main__":

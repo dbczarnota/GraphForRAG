@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import os
 import textwrap
 from langchain_neo4j import Neo4jGraph
+from typing import List
 
 logger = logging.getLogger("graph_for_rag.schema")
 
@@ -284,31 +285,235 @@ class SchemaManager:
         logger.info("Finished attempting to drop known indexes and constraints.")
 
 
-def get_schema(uri: str | None = None, user: str | None = None, password: str | None = None) -> str | None:
-    """Retrieve the Neo4j database schema using ``Neo4jGraph.refresh_schema``.
+    async def get_schema_string(self) -> str:
+        """
+        Retrieves and formats the database schema string.
+        Uses APOC for detailed property types and relationship patterns if available, 
+        with fallbacks to simpler schema introspection queries.
+        Includes Node properties, Relationship properties, Relationship patterns, and Available Indexes.
+        """
+        schema_parts: List[str] = []
+        
+        excluded_labels_for_nodes = ["_Bloom_Perspective_", "_Bloom_Scene_", "__KGBuilder__", "__Entity__", "_GraphView_", "_DbView_", "_Token_"]
+        excluded_rel_types_list = ["_Bloom_HAS_SCENE_"]
 
-    Parameters override the corresponding ``NEO4J_*`` environment variables if
-    provided. The ``.env`` file is loaded to allow local configuration.
+        # --- Section: Node Properties ---
+        node_properties_list: List[str] = ["Node properties:"]
+        try:
+            node_schema_results, _, _ = await self.driver.execute_query(
+                cypher_queries.SCHEMA_GET_NODE_PROPERTIES_APOC,
+                excludedLabels=excluded_labels_for_nodes, 
+                database_=self.database
+            ) # type: ignore
 
-    Returns the schema string or ``None`` when the schema could not be
-    retrieved (for example when ``OPENAI_API_KEY`` is missing).
-    """
-    load_dotenv()
+            if node_schema_results:
+                for record in node_schema_results:
+                    output = record["output"]
+                    label = output["label"]
+                    # Sort properties alphabetically for consistent output
+                    props = sorted(output["properties"], key=lambda x: x["property"]) 
+                    prop_details = []
+                    for p in props:
+                        prop_name = p["property"]
+                        neo4j_type_raw = p["type"] # Type string from apoc.meta.data
+                        
+                        prop_type_str = neo4j_type_raw.upper() # Default to uppercase
+                        if "LIST" in prop_type_str:
+                            prop_type_str = "LIST"
+                        elif prop_type_str in ["DATETIME", "ZONED DATETIME", "LOCAL DATETIME"]:
+                            prop_type_str = "DATE_TIME"
+                        elif prop_type_str == "TEXT": # APOC can return "TEXT" for string-like
+                            prop_type_str = "STRING"
+                        elif prop_type_str == "LONG":
+                            prop_type_str = "INTEGER"
+                        elif prop_type_str == "DOUBLE":
+                            prop_type_str = "FLOAT"
+                        # Other common types like STRING, INTEGER, FLOAT, BOOLEAN, DATE, TIME, POINT are already handled by .upper()
+                        
+                        prop_details.append(f"{prop_name}: {prop_type_str}")
+                    
+                    if prop_details:
+                        formatted_props = "\n".join([f"  {pd}" for pd in prop_details])
+                        node_properties_list.append(f"{label} {{\n{formatted_props}\n}}")
+                    else:
+                        node_properties_list.append(f"{label} {{}}") # Node with no properties
+            else: 
+                # Fallback if APOC for nodes failed or returned nothing
+                logger.warning("APOC meta data for nodes returned no results or failed. Falling back to basic label listing for node properties.")
+                node_labels_results_fb, _, _ = await self.driver.execute_query(
+                    cypher_queries.SCHEMA_GET_NODE_LABELS_FALLBACK, 
+                    database_=self.database
+                ) # type: ignore
+                for record_fb in node_labels_results_fb:
+                    node_properties_list.append(f"{record_fb['label']} {{}}") # No property info in this specific fallback
 
-    neo4j_uri = uri or os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-    neo4j_user = user or os.environ.get("NEO4J_USER", "neo4j")
-    neo4j_password = password or os.environ.get("NEO4J_PASSWORD", "password")
+        except Exception as e_node_props:
+            logger.error(f"Error retrieving node properties: {e_node_props}", exc_info=True)
+            node_properties_list.append("  Error: Could not retrieve node properties.")
+        
+        schema_parts.extend(node_properties_list)
+        schema_parts.append("") # Blank line separator
 
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    if not openai_api_key:
-        logger.error(
-            "OPENAI_API_KEY not found in environment variables. Cannot initialize OpenAIEmbedder."
-        )
-        return None
+        # --- Section: Relationship Properties ---
+        rel_properties_list: List[str] = ["Relationship properties:"]
+        try:
+            rel_schema_results, _, _ = await self.driver.execute_query(
+                cypher_queries.SCHEMA_GET_REL_PROPERTIES_APOC, 
+                excludedRelTypes=excluded_rel_types_list, 
+                database_=self.database
+            ) # type: ignore
+            
+            if rel_schema_results:
+                for record in rel_schema_results:
+                    output = record["output"]
+                    rel_type_name = output["type"]
+                    props = sorted(output["properties"], key=lambda x: x["property"])
+                    prop_details = []
+                    for p in props:
+                        prop_name = p["property"]
+                        neo4j_type_raw = p["type"]
+                        
+                        prop_type_str = neo4j_type_raw.upper()
+                        if "LIST" in prop_type_str:
+                            prop_type_str = "LIST"
+                        elif prop_type_str in ["DATETIME", "ZONED DATETIME", "LOCAL DATETIME"]:
+                            prop_type_str = "DATE_TIME"
+                        elif prop_type_str == "TEXT":
+                            prop_type_str = "STRING"
+                        elif prop_type_str == "LONG":
+                            prop_type_str = "INTEGER"
+                        elif prop_type_str == "DOUBLE":
+                            prop_type_str = "FLOAT"
+                        
+                        prop_details.append(f"{prop_name}: {prop_type_str}")
+                    
+                    if prop_details:
+                        formatted_props = "\n".join([f"  {pd}" for pd in prop_details])
+                        rel_properties_list.append(f"{rel_type_name} {{\n{formatted_props}\n}}")
+                    else:
+                        rel_properties_list.append(f"{rel_type_name} {{}}") # Relationship with no properties
+            else: 
+                logger.warning("APOC meta data for relationships returned no results or failed. Falling back to basic rel type listing for relationship properties.")
+                rel_types_results_fb, _, _ = await self.driver.execute_query(
+                    cypher_queries.SCHEMA_GET_REL_TYPES_FALLBACK, 
+                    database_=self.database
+                ) # type: ignore
+                for record_fb in rel_types_results_fb:
+                    rel_properties_list.append(f"{record_fb['relationshipType']} {{}}")
 
-    kg = Neo4jGraph(url=neo4j_uri, username=neo4j_user, password=neo4j_password)
+        except Exception as e_rel_props:
+            logger.error(f"Error retrieving relationship properties: {e_rel_props}", exc_info=True)
+            rel_properties_list.append("  Error: Could not retrieve relationship properties.")
 
-    kg.refresh_schema()
- 
-    logger.info(f"SCHEMA: {textwrap.fill(kg.schema, 60)}")
-    return kg.schema
+        schema_parts.extend(rel_properties_list)
+        schema_parts.append("")
+
+        # --- Section: Relationship Patterns ---
+        rel_connections_list: List[str] = ["The relationships:"]
+        try:
+            connection_results, _, _ = await self.driver.execute_query(
+                cypher_queries.SCHEMA_GET_REL_CONNECTIONS_APOC, 
+                excludedLabels=excluded_labels_for_nodes, 
+                database_=self.database
+            ) # type: ignore
+            if connection_results:
+                for record in connection_results:
+                    rel_connections_list.append(record["connection"])
+            else: 
+                logger.warning("APOC meta data for relationship connections returned no results. Falling back to db.schema.visualization().")
+                connection_results_fb, _, _ = await self.driver.execute_query(
+                    cypher_queries.SCHEMA_GET_REL_CONNECTIONS_VISUALIZATION_FALLBACK, 
+                    database_=self.database
+                ) # type: ignore
+                for record_fb in connection_results_fb:
+                    rel_connections_list.append(record_fb["connection"])
+        except Exception as e_apoc_conn:
+             logger.error(f"Error generating relationship connections via APOC: {e_apoc_conn}", exc_info=False)
+             logger.warning("Falling back to db.schema.visualization() for relationship connections due to APOC error.")
+             try:
+                 connection_results_fb, _, _ = await self.driver.execute_query(
+                    cypher_queries.SCHEMA_GET_REL_CONNECTIONS_VISUALIZATION_FALLBACK, 
+                    database_=self.database
+                ) # type: ignore
+                 for record_fb in connection_results_fb:
+                     rel_connections_list.append(record_fb["connection"])
+             except Exception as e_viz_fallback:
+                 logger.error(f"Fallback db.schema.visualization() also failed: {e_viz_fallback}", exc_info=True)
+                 rel_connections_list.append("  Error: Could not retrieve relationship patterns.")
+        
+        schema_parts.extend(rel_connections_list)
+        schema_parts.append("")
+
+
+        # # --- Section: Available Indexes ---
+        # index_info_list: List[str] = ["Available Indexes:"]
+        # fulltext_indexes_str: List[str] = []
+        # vector_indexes_str: List[str] = []
+        # other_indexes_str: List[str] = [] # For RANGE, POINT etc.
+
+        # try:
+        #     index_results, _, _ = await self.driver.execute_query(
+        #         cypher_queries.SCHEMA_GET_INDEX_INFO,
+        #         database_=self.database
+        #     ) # type: ignore
+
+        #     for record in index_results:
+        #         name = record["name"]
+        #         index_type_raw = record["type"]
+        #         index_type = index_type_raw.upper() if index_type_raw else "UNKNOWN"
+        #         entity_type = record["entityType"].upper() if record["entityType"] else "UNKNOWN"
+        #         labels_or_types = record["labelsOrTypes"] if record["labelsOrTypes"] else []
+        #         properties = record["properties"] if record["properties"] else []
+        #         options = record["options"] if isinstance(record["options"], dict) else {}
+
+        #         # Filter out some common system/internal/less relevant indexes for LLM context
+        #         if name.startswith("constraint_") or name.startswith("dynamic_idx_") or name.startswith("token_lookup_"):
+        #             continue
+        #         if "_Bloom_" in name or name in ["nodes_entity_unique_id", "relationship_id_index", "relationships_unique_id_rels"]: # More specific exclusions
+        #             continue
+
+        #         formatted_props = ", ".join(properties)
+        #         on_clause_entity_part = ""
+        #         if labels_or_types: # Handle cases where labelsOrTypes might be None or empty
+        #             on_clause_entity_part = f":{labels_or_types[0]}" if labels_or_types else ""
+                
+        #         on_clause = f"ON {entity_type}{on_clause_entity_part}({formatted_props})"
+
+        #         if index_type == "TEXT" or index_type == "FULLTEXT":
+        #             fulltext_indexes_str.append(f"  - {name} (TYPE: {index_type}, {on_clause})")
+        #         elif index_type == "VECTOR":
+        #             options_str_parts = []
+        #             if options.get("indexProvider"): # e.g., 'vector-1.0'
+        #                 # options_str_parts.append(f"provider: {options['indexProvider']}")
+        #                 pass # Provider often not needed for LLM to use the index by name
+        #             vec_dims = options.get("vector.dimensions")
+        #             if vec_dims is not None: options_str_parts.append(f"dimensions: {vec_dims}")
+        #             vec_sim = options.get("vector.similarity_function")
+        #             if vec_sim: options_str_parts.append(f"similarity: {vec_sim}")
+                    
+        #             options_display = f" OPTIONS {{{', '.join(options_str_parts)}}}" if options_str_parts else ""
+        #             vector_indexes_str.append(f"  - {name} (TYPE: {index_type}, {on_clause}{options_display})")
+        #         elif index_type in ["RANGE", "POINT", "LOOKUP"]: # Explicitly list other relevant types
+        #             other_indexes_str.append(f"  - {name} (TYPE: {index_type}, {on_clause})")
+        #         # Silently ignore other index types not explicitly handled if any
+
+        # except Exception as e_index:
+        #     logger.error(f"Error fetching or formatting index information: {e_index}", exc_info=True)
+        #     index_info_list.append("  Error: Could not retrieve index information.")
+
+        # if fulltext_indexes_str:
+        #     index_info_list.append("Full-text Indexes:")
+        #     index_info_list.extend(sorted(fulltext_indexes_str))
+        # if vector_indexes_str:
+        #     index_info_list.append("Vector Indexes:")
+        #     index_info_list.extend(sorted(vector_indexes_str))
+        # if other_indexes_str:
+        #     index_info_list.append("Other Relevant Indexes (e.g., RANGE, POINT):")
+        #     index_info_list.extend(sorted(other_indexes_str))
+        
+        # if not fulltext_indexes_str and not vector_indexes_str and not other_indexes_str and "Error: Could not retrieve index information." not in index_info_list:
+        #     index_info_list.append("  No user-defined Full-text or Vector indexes found (or they were filtered out).")
+        
+        # schema_parts.extend(index_info_list)
+        
+        return "\n".join(schema_parts)

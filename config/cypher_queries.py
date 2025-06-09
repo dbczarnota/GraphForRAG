@@ -751,3 +751,97 @@ DELETE_PRODUCT_BY_UUID_DETACH = "MATCH (p:Product {uuid: $uuid}) DETACH DELETE p
 DELETE_PRODUCTS_BY_UUIDS_DETACH = "MATCH (p:Product) WHERE p.uuid IN $product_uuids DETACH DELETE p RETURN count(p) as deleted_count"
 DELETE_CHUNKS_BY_UUIDS_DETACH = "MATCH (c:Chunk) WHERE c.uuid IN $chunk_uuids DETACH DELETE c RETURN count(c) as deleted_count"
 DELETE_SOURCE_BY_UUID_DETACH = "MATCH (s:Source {uuid: $source_uuid}) DETACH DELETE s RETURN count(s) as deleted_count"
+
+
+
+# --- Schema Retrieval Queries ---
+SCHEMA_GET_NODE_PROPERTIES_APOC = """
+CALL apoc.meta.data()
+YIELD label, other, elementType, type, property
+WHERE NOT type = 'RELATIONSHIP' AND elementType = 'node'
+AND NOT label IN $excludedLabels
+WITH label AS nodeLabel, collect({property:property, type:type}) AS properties
+RETURN {label: nodeLabel, properties: properties} AS output
+ORDER BY nodeLabel
+"""
+
+SCHEMA_GET_NODE_LABELS_FALLBACK = """
+CALL db.labels() YIELD label RETURN label ORDER BY label
+"""
+
+SCHEMA_GET_NODE_PROP_KEYS_FALLBACK_TEMPLATE = """
+MATCH (n:`{node_label_placeholder}`)
+WITH n LIMIT 1
+UNWIND keys(properties(n)) AS key
+RETURN DISTINCT key
+ORDER BY key
+"""
+
+SCHEMA_GET_REL_PROPERTIES_APOC = """
+CALL apoc.meta.data()
+YIELD label, other, elementType, type, property
+WHERE NOT type = 'RELATIONSHIP' AND elementType = 'relationship'
+AND NOT label IN $excludedRelTypes
+WITH label AS relType, collect({property:property, type:type}) AS properties
+RETURN {type: relType, properties: properties} AS output
+ORDER BY relType
+"""
+
+SCHEMA_GET_REL_TYPES_FALLBACK = """
+CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType ORDER BY relationshipType
+"""
+
+SCHEMA_GET_REL_PROP_KEYS_FALLBACK_TEMPLATE = """
+MATCH ()-[r:`{rel_type_placeholder}`]->()
+WITH r LIMIT 1
+UNWIND keys(properties(r)) AS key
+RETURN DISTINCT key
+ORDER BY key
+"""
+
+SCHEMA_GET_REL_CONNECTIONS_APOC = """
+CALL apoc.meta.data()
+YIELD label, other, elementType, type, property
+WHERE type = 'RELATIONSHIP' AND elementType = 'node'
+AND NOT label IN $excludedLabels
+UNWIND other AS other_node_label
+WITH * WHERE NOT other_node_label IN $excludedLabels
+RETURN DISTINCT "(" + label + ")-[:" + property + "]->(" + toString(other_node_label) + ")" AS connection
+ORDER BY connection
+"""
+
+SCHEMA_GET_REL_CONNECTIONS_VISUALIZATION_FALLBACK = """
+CALL db.schema.visualization()
+YIELD relationships
+UNWIND relationships AS rel
+WITH DISTINCT labels(startNode(rel))[0] AS startLabel, 
+              type(rel) AS relType, 
+              labels(endNode(rel))[0] AS endLabel
+WHERE startLabel IS NOT NULL AND endLabel IS NOT NULL AND relType IS NOT NULL
+RETURN "(" + startLabel + ")-[:" + relType + "]->(" + endLabel + ")" AS connection
+ORDER BY connection
+"""
+
+SCHEMA_NODE_PROPERTY_TYPE_APOC_TEMPLATE = """
+MATCH (n:`{node_label_placeholder}`)
+WITH n LIMIT 100
+UNWIND keys(properties(n)) AS key
+WITH key, apoc.meta.cypher.type(n[key]) AS neo4jPropType
+RETURN DISTINCT key, neo4jPropType
+ORDER BY key
+"""
+
+SCHEMA_REL_PROPERTY_TYPE_APOC_TEMPLATE = """
+MATCH ()-[r:`{rel_type_placeholder}`]->()
+WITH r LIMIT 100
+UNWIND keys(properties(r)) AS key
+WITH key, apoc.meta.cypher.type(r[key]) AS neo4jPropType
+RETURN DISTINCT key, neo4jPropType
+ORDER BY key
+"""
+
+SCHEMA_GET_INDEX_INFO = """
+SHOW INDEXES YIELD name, type, entityType, labelsOrTypes, properties, options
+RETURN name, type, entityType, labelsOrTypes, properties, options
+ORDER BY type, name
+"""
