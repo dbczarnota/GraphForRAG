@@ -21,31 +21,116 @@ logger = logging.getLogger("graph_schema")
 
 schema_set = """
 Node properties:
-Chunk {uuid: STRING, content: STRING, name: STRING, source_description: STRING, created_at: DATE_TIME, entity_count: INTEGER, relationship_count: INTEGER, chunk_number: INTEGER,      
-keywords: LIST, content_embedding: LIST, characters_present: LIST, interaction_type: STRING, setting: STRING, theme: STRING, problem: STRING, setting_detail: STRING,
-resolution_pending: STRING}
-Source {uuid: STRING, content: STRING, name: STRING, created_at: DATE_TIME, region: STRING, release_date: STRING, content_embedding: LIST, catalog_version: STRING, prepared_by:       
-STRING, category: STRING, author: STRING, original_publication_year: INTEGER, version: STRING, publication_date: STRING}
-Entity {uuid: STRING, name: STRING, created_at: DATE_TIME, label: STRING, name_embedding: LIST, updated_at: DATE_TIME, normalized_name: STRING}
-Product {uuid: STRING, content: STRING, name: STRING, created_at: DATE_TIME, category: STRING, price: FLOAT, sku: STRING, content_embedding: LIST, name_embedding: LIST, updated_at:   
-DATE_TIME, release_year: INTEGER, brand: STRING, features_list: LIST, editor_rating_numeric: FLOAT, target_audience_tags: LIST, technical_specs: STRING, internal_product_id: STRING,  
-available_colors: LIST, review_score_techradar_numeric: FLOAT, key_technical_specs: LIST, chassis_material: STRING, os_included: STRING, keyboard_accessory_separate: BOOLEAN,
-operating_system_version: STRING, display_tech: STRING, pen_compatibility: STRING, display_refresh_rate_hz: INTEGER, current_availability_status: STRING, display_panel_type: STRING,  
-cooling_system_type: STRING, gpu_model: STRING}
+Chunk {
+  characters_present: LIST
+  chunk_number: INTEGER
+  content: STRING
+  content_embedding: LIST
+  created_at: DATE_TIME
+  entity_count: INTEGER
+  interaction_type: STRING
+  keywords: LIST
+  name: STRING
+  problem: STRING
+  relationship_count: INTEGER
+  resolution_pending: STRING
+  setting: STRING
+  setting_detail: STRING
+  source_description: STRING
+  theme: STRING
+  uuid: STRING
+}
+Entity {
+  created_at: DATE_TIME
+  label: STRING
+  name: STRING
+  name_embedding: LIST
+  normalized_name: STRING
+  updated_at: DATE_TIME
+  uuid: STRING
+}
+Product {
+  available_colors: LIST
+  brand: STRING
+  category: STRING
+  chassis_material: STRING
+  content: STRING
+  content_embedding: LIST
+  cooling_system_type: STRING
+  created_at: DATE_TIME
+  current_availability_status: STRING
+  display_panel_type: STRING
+  display_refresh_rate_hz: INTEGER
+  display_tech: STRING
+  editor_rating_numeric: FLOAT
+  features_list: LIST
+  gpu_model: STRING
+  internal_product_id: STRING
+  key_technical_specs: LIST
+  keyboard_accessory_separate: BOOLEAN
+  name: STRING
+  name_embedding: LIST
+  operating_system_version: STRING
+  os_included: STRING
+  pen_compatibility: STRING
+  price: FLOAT
+  release_year: INTEGER
+  review_score_techradar_numeric: FLOAT
+  sku: STRING
+  target_audience_tags: LIST
+  technical_specs: STRING
+  updated_at: DATE_TIME
+  uuid: STRING
+}
+Source {
+  author: STRING
+  catalog_version: STRING
+  category: STRING
+  content: STRING
+  content_embedding: LIST
+  created_at: DATE_TIME
+  name: STRING
+  original_publication_year: INTEGER
+  prepared_by: STRING
+  publication_date: STRING
+  region: STRING
+  release_date: STRING
+  uuid: STRING
+  version: STRING
+}
+
 Relationship properties:
-NEXT_CHUNK {created_at: DATE_TIME}
-BELONGS_TO_SOURCE {created_at: DATE_TIME}
-RELATES_TO {uuid: STRING, created_at: DATE_TIME, relation_label: STRING, fact_embedding: LIST, fact_sentence: STRING, source_chunk_uuid: STRING}
-MENTIONS {uuid: STRING, created_at: DATE_TIME, fact_embedding: LIST, fact_sentence: STRING, source_chunk_uuid: STRING}
+BELONGS_TO_SOURCE {
+  created_at: DATE_TIME
+}
+MENTIONS {
+  created_at: DATE_TIME
+  fact_embedding: LIST
+  fact_sentence: STRING
+  source_chunk_uuid: STRING
+  uuid: STRING
+}
+NEXT_CHUNK {
+  created_at: DATE_TIME
+}
+RELATES_TO {
+  created_at: DATE_TIME
+  fact_embedding: LIST
+  fact_sentence: STRING
+  relation_label: STRING
+  source_chunk_uuid: STRING
+  uuid: STRING
+}
+
 The relationships:
-(:Chunk)-[:NEXT_CHUNK]->(:Chunk)
-(:Chunk)-[:MENTIONS]->(:Entity)
-(:Chunk)-[:MENTIONS]->(:Product)
-(:Chunk)-[:BELONGS_TO_SOURCE]->(:Source)
-(:Entity)-[:RELATES_TO]->(:Entity)
-(:Entity)-[:RELATES_TO]->(:Product)
-(:Product)-[:BELONGS_TO_SOURCE]->(:Source)
-(:Product)-[:RELATES_TO]->(:Entity)
+(Chunk)-[:BELONGS_TO_SOURCE]->(Source)
+(Chunk)-[:MENTIONS]->(Entity)
+(Chunk)-[:MENTIONS]->(Product)
+(Chunk)-[:NEXT_CHUNK]->(Chunk)
+(Entity)-[:RELATES_TO]->(Entity)
+(Entity)-[:RELATES_TO]->(Product)
+(Product)-[:BELONGS_TO_SOURCE]->(Source)
+(Product)-[:RELATES_TO]->(Entity)
 """
 async def main():
 
