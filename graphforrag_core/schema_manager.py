@@ -4,19 +4,83 @@ import re
 from neo4j import AsyncDriver # type: ignore
 from config import cypher_queries # Import the whole module
 from .embedder_client import EmbedderClient
+from .types import FlaggedPropertiesConfig
 from dotenv import load_dotenv
 import os
 import textwrap
 from langchain_neo4j import Neo4jGraph
-from typing import List
+from typing import List, Optional
 
 logger = logging.getLogger("graph_for_rag.schema")
 
 class SchemaManager:
-    def __init__(self, driver: AsyncDriver, database: str, embedder: EmbedderClient):
+    def __init__(self, driver: AsyncDriver, database: str, embedder: EmbedderClient, flagged_properties_config: Optional[FlaggedPropertiesConfig] = None):
         self.driver: AsyncDriver = driver
         self.database: str = database
         self.embedder: EmbedderClient = embedder
+        self.flagged_properties_config = flagged_properties_config if flagged_properties_config else FlaggedPropertiesConfig() # Store the config
+
+    async def _get_distinct_property_values(self, node_label: str, property_name: str, limit: int) -> Optional[List[str]]:
+        """
+        Fetches distinct non-null string values for a given property of a node label.
+        Returns None if an error occurs or no values are found.
+        """
+        if not re.match(r"^[A-Za-z0-9_]+$", node_label) or not re.match(r"^[A-Za-z0-9_]+$", property_name):
+            logger.error(f"Invalid node_label ('{node_label}') or property_name ('{property_name}') for distinct value query.")
+            return None
+        
+        # Constructing the query string safely.
+        # This query now handles both direct string properties and lists of strings.
+        query = cypher_queries.GET_DISTINCT_NODE_PROPERTY_VALUES.format(
+            node_label_placeholder=node_label,
+            property_name_placeholder=property_name
+        )
+        try:
+            results, _, _ = await self.driver.execute_query(
+                query,
+                limit_param=limit,
+                database_=self.database
+            ) # type: ignore
+            distinct_values = [str(record["value"]) for record in results if record["value"] is not None]
+            if distinct_values:
+                logger.debug(f"Fetched {len(distinct_values)} distinct values for {node_label}.{property_name}: {distinct_values}")
+                return distinct_values
+            else:
+                logger.debug(f"No distinct non-null string values found for {node_label}.{property_name} within limit {limit}.")
+                return None
+        except Exception as e:
+            logger.error(f"Error fetching distinct values for {node_label}.{property_name}: {e}", exc_info=True)
+            return None
+        
+    async def _get_distinct_rel_property_values(self, rel_type: str, property_name: str, limit: int) -> Optional[List[str]]:
+        """
+        Fetches distinct non-null string values for a given property of a relationship type.
+        Returns None if an error occurs or no values are found.
+        """
+        if not re.match(r"^[A-Za-z0-9_]+$", rel_type) or not re.match(r"^[A-Za-z0-9_]+$", property_name):
+            logger.error(f"Invalid rel_type ('{rel_type}') or property_name ('{property_name}') for distinct value query.")
+            return None
+
+        query = cypher_queries.GET_DISTINCT_REL_PROPERTY_VALUES.format(
+            rel_type_placeholder=rel_type,
+            property_name_placeholder=property_name
+        )
+        try:
+            results, _, _ = await self.driver.execute_query(
+                query,
+                limit_param=limit,
+                database_=self.database
+            ) # type: ignore
+            distinct_values = [str(record["value"]) for record in results if record["value"] is not None]
+            if distinct_values:
+                logger.debug(f"Fetched {len(distinct_values)} distinct values for {rel_type}.{property_name}: {distinct_values}")
+                return distinct_values
+            else:
+                logger.debug(f"No distinct non-null string values found for {rel_type}.{property_name} within limit {limit}.")
+                return None
+        except Exception as e:
+            logger.error(f"Error fetching distinct values for {rel_type}.{property_name}: {e}", exc_info=True)
+            return None
 
     async def _get_dynamic_properties_for_btree_indexing(self, node_label: str) -> list[str]:
         logger.debug(f"Fetching dynamic properties for B-Tree indexing on label: {node_label}")
@@ -328,9 +392,22 @@ class SchemaManager:
                             prop_type_str = "INTEGER"
                         elif prop_type_str == "DOUBLE":
                             prop_type_str = "FLOAT"
-                        # Other common types like STRING, INTEGER, FLOAT, BOOLEAN, DATE, TIME, POINT are already handled by .upper()
                         
-                        prop_details.append(f"{prop_name}: {prop_type_str}")
+                        property_display_string = f"{prop_name}: {prop_type_str}"
+
+                        # Check if this property is flagged for distinct value fetching
+                        if self.flagged_properties_config.nodes and \
+                           label in self.flagged_properties_config.nodes and \
+                           prop_name in self.flagged_properties_config.nodes[label] and \
+                           prop_type_str in ["STRING", "LIST"]: # Now also check for LIST type
+                            
+                            value_config = self.flagged_properties_config.nodes[label][prop_name]
+                            distinct_values = await self._get_distinct_property_values(label, prop_name, value_config.limit)
+                            if distinct_values:
+                                values_str = ", ".join(distinct_values)
+                                property_display_string += f" {{possible values: {{{values_str}}}}}"
+                        
+                        prop_details.append(property_display_string)
                     
                     if prop_details:
                         formatted_props = "\n".join([f"  {pd}" for pd in prop_details])
@@ -385,7 +462,22 @@ class SchemaManager:
                         elif prop_type_str == "DOUBLE":
                             prop_type_str = "FLOAT"
                         
-                        prop_details.append(f"{prop_name}: {prop_type_str}")
+                        property_display_string = f"{prop_name}: {prop_type_str}"
+
+                        # Check if this relationship property is flagged for distinct value fetching
+                        if self.flagged_properties_config.relationships and \
+                           rel_type_name in self.flagged_properties_config.relationships and \
+                           prop_name in self.flagged_properties_config.relationships[rel_type_name] and \
+                           prop_type_str in ["STRING", "LIST"]: # Now also check for LIST type
+                            
+                            value_config = self.flagged_properties_config.relationships[rel_type_name][prop_name]
+                            # Use the new helper method for relationship properties
+                            distinct_values = await self._get_distinct_rel_property_values(rel_type_name, prop_name, value_config.limit)
+                            if distinct_values:
+                                values_str = ", ".join(distinct_values)
+                                property_display_string += f" {{possible values: {{{values_str}}}}}"
+
+                        prop_details.append(property_display_string)
                     
                     if prop_details:
                         formatted_props = "\n".join([f"  {pd}" for pd in prop_details])

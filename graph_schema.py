@@ -10,6 +10,7 @@ import textwrap
 import asyncio
 from graphforrag_core.graphforrag import GraphForRAG
 from graphforrag_core.openai_embedder import OpenAIEmbedder, OpenAIEmbedderConfig
+from graphforrag_core.types import FlaggedPropertiesConfig, PropertyValueConfig
 
 logging.basicConfig(
     level=logging.INFO, 
@@ -151,11 +152,18 @@ async def main():
         embedder_config = OpenAIEmbedderConfig(api_key=OPENAI_API_KEY) # Default or your specific config
         openai_embedder = OpenAIEmbedder(config=embedder_config)
 
+        example_flagged_config_for_graph_schema = FlaggedPropertiesConfig(
+            nodes={
+                "Product": {"category": PropertyValueConfig(limit=3)},
+            }
+        )
+
         graph_for_rag_instance = GraphForRAG(
             uri=NEO4J_URI,
             user=NEO4J_USER,
             password=NEO4J_PASSWORD,
-            embedder_client=openai_embedder # Pass the embedder
+            embedder_client=openai_embedder, # Pass the embedder
+            flagged_properties_config=example_flagged_config_for_graph_schema # Pass the new config
         )
         
         logger.info("SCHEMA (from GraphForRAG.get_schema()):")

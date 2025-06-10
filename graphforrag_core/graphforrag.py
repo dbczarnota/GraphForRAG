@@ -33,6 +33,8 @@ from .search_types import (
 )
 from .multi_query_generator import MultiQueryGenerator
 from .types import IngestionConfig
+from .types import IngestionConfig, FlaggedPropertiesConfig
+from .cypher_generator import CypherGenerator
 
 logger = logging.getLogger("graph_for_rag")
 
@@ -45,7 +47,8 @@ class GraphForRAG:
         database: str = "neo4j",
         embedder_client: Optional[EmbedderClient] = None,
         # llm_client: Optional[Any] = None, # --- REMOVED PARAMETER ---
-        ingestion_config: Optional[IngestionConfig] = None 
+        ingestion_config: Optional[IngestionConfig] = None,
+        default_schema_flagged_properties_config: Optional[FlaggedPropertiesConfig] = None
     ):
         logger.info(f"GraphForRAG initializing for DB '{database}' at '{uri}'.")
         init_start_time = time.perf_counter()
@@ -68,8 +71,9 @@ class GraphForRAG:
             self._entity_resolver: Optional[EntityResolver] = None
             self._relationship_extractor: Optional[RelationshipExtractor] = None
             self._multi_query_generator: Optional[MultiQueryGenerator] = None
+            self._cypher_generator: Optional[CypherGenerator] = None # New private attribute
             
-            self.schema_manager = SchemaManager(self.driver, self.database, self.embedder)
+            self.schema_manager = SchemaManager(self.driver, self.database, self.embedder, default_schema_flagged_properties_config) # Use new config name
             self.node_manager = NodeManager(self.driver, self.database)
             self.search_manager = SearchManager(self.driver, self.database, self.embedder) 
             
@@ -137,7 +141,35 @@ class GraphForRAG:
         if self._multi_query_generator is None:
             self._multi_query_generator = MultiQueryGenerator(llm_client=self._ensure_services_llm_client())
         return self._multi_query_generator
-
+    
+    @property
+    def cypher_generator(self) -> Optional[CypherGenerator]: # Optional, as it depends on search_config
+        """
+        Provides an instance of CypherGenerator.
+        The LLM client and flagged_properties_config for this generator
+        are determined by the CypherSearchConfig passed during a search operation.
+        This property might seem to initialize with a default LLM, but its actual
+        LLM and schema config will be set/overridden per search call if CypherSearch is enabled.
+        Consider this a placeholder or default instance. The real configuration happens in `search()`.
+        Alternatively, CypherGenerator instantiation could be entirely within the search() method.
+        For now, let's allow a default instantiation here.
+        """
+        if self._cypher_generator is None:
+            # This default instantiation might use a general LLM.
+            # The `search` method will need to pass the specific config from `SearchConfig`
+            # to a method of `CypherGenerator` or re-initialize it.
+            # For simplicity of this property, let's use _ensure_services_llm_client,
+            # but acknowledge that the search method will drive the actual config.
+            logger.debug("GraphForRAG: Initializing default CypherGenerator instance.")
+            self._cypher_generator = CypherGenerator(
+                llm_client=self._ensure_services_llm_client(), # Default LLM for now
+                driver=self.driver,
+                database_name=self.database,
+                embedder_client=self.embedder,
+                flagged_properties_config=None # Default schema config for this instance
+            )
+        return self._cypher_generator
+    
     def _accumulate_generative_usage(self, new_usage: Optional[Usage]): # RENAMED
         if new_usage and hasattr(new_usage, 'has_values') and new_usage.has_values():
             self.total_generative_llm_usage = self.total_generative_llm_usage + new_usage # type: ignore
@@ -279,18 +311,20 @@ class GraphForRAG:
             config = SearchConfig()
         all_queries_to_process: List[str] = [] 
         total_mqr_generation_duration = 0.0
-        # alternative_queries_list: List[str] = [] # Defined later if needed
+        generated_cypher_query: Optional[str] = None # To store the LLM-generated Cypher
+        cypher_generation_duration = 0.0         # To store its generation time
+        cypher_generation_usage: Optional[Usage] = None # To store its LLM usage
+
+        # --- Parallel Task Preparation: MQR and Cypher Generation ---
+        parallel_tasks = []
+        mqr_task_idx = -1 # To identify MQR results later
+        cypher_gen_task_idx = -1 # To identify Cypher gen results later
 
         if config.mqr_config and config.mqr_config.enabled:
             logger.info(f"MQR enabled. Config: {config.mqr_config.model_dump_json(indent=2, exclude_none=True)}")
             
-            alternative_queries_list: List[str] = [] # Initialize here
-            
-            # --- Start of modification ---
-            if config.mqr_config.max_alternative_questions > 0:
-                # Only setup/use MQG if we are actually generating alternatives
+            async def mqr_generation_wrapper(): # Wrapper to easily add to gather
                 mq_generator_for_this_search: MultiQueryGenerator
-
                 if config.mqr_config.mqr_llm_models is not None:
                     models_for_mqr_setup = config.mqr_config.mqr_llm_models
                     log_msg_model_source = models_for_mqr_setup if models_for_mqr_setup else "internal defaults of setup_fallback_model"
@@ -301,34 +335,102 @@ class GraphForRAG:
                     logger.info("MQR: Using default service LLM for MQR generation (via self.multi_query_generator property).")
                     mq_generator_for_this_search = self.multi_query_generator
                 
-                mqr_start_time = time.perf_counter()
-                generated_alts, mqr_usage = await mq_generator_for_this_search.generate_alternative_queries(
+                return await mq_generator_for_this_search.generate_alternative_queries(
                     original_query=query_text,
                     max_alternative_questions=config.mqr_config.max_alternative_questions
                 )
-                self._accumulate_generative_usage(mqr_usage)
-                total_mqr_generation_duration = (time.perf_counter() - mqr_start_time) * 1000
-                if generated_alts: 
-                    alternative_queries_list = generated_alts 
-                logger.info(f"MQR: Generation took {total_mqr_generation_duration:.2f} ms. Found {len(alternative_queries_list)} alternatives.")
-            else:
-                logger.info("MQR: max_alternative_questions is 0, no alternative queries will be generated. LLM setup for MQR (if specific) is skipped.")
-            # --- End of modification ---
-            
-            if config.mqr_config.include_original_query:
-                all_queries_to_process.append(query_text)
-            
-            if alternative_queries_list: 
-                all_queries_to_process.extend(alternative_queries_list)
-            
-            if not all_queries_to_process:
-                logger.warning("MQR is enabled but resulted in no queries to process (original query might be excluded and no alternatives generated/kept). Search will be skipped.")
-                return CombinedSearchResults(query_text=query_text) 
+            parallel_tasks.append(mqr_generation_wrapper())
+            mqr_task_idx = len(parallel_tasks) - 1
+        else:
+            logger.info(f"MQR not enabled or no MQR config. Original query will be processed: '{query_text}'")
+
+        if config.cypher_search_config and config.cypher_search_config.enabled:
+            logger.info(f"Cypher Search enabled. Config: {config.cypher_search_config.model_dump_json(indent=2, exclude_none=True)}")
+
+            async def cypher_generation_wrapper(): # Wrapper for Cypher generation
+                # Instantiate CypherGenerator specifically for this search call
+                cypher_gen_llm_models = config.cypher_search_config.llm_models # May be None
+                cypher_gen_flagged_props_config = config.cypher_search_config.flagged_properties_config # May be None
                 
-            logger.info(f"MQR: Total queries to process: {len(all_queries_to_process)} ({'Original included, ' if config.mqr_config.include_original_query else 'Original excluded, '}{len(alternative_queries_list)} alternatives)")
-        else: 
-            all_queries_to_process.append(query_text)
-            logger.info(f"MQR not enabled or no MQR config. Processing original query: '{query_text}'")
+                llm_for_cypher_gen = setup_fallback_model(cypher_gen_llm_models) if cypher_gen_llm_models else self._ensure_services_llm_client()
+                
+                cypher_gen_instance = CypherGenerator(
+                    llm_client=llm_for_cypher_gen,
+                    driver=self.driver,
+                    database_name=self.database,
+                    embedder_client=self.embedder,
+                    flagged_properties_config=cypher_gen_flagged_props_config
+                )
+                return await cypher_gen_instance.generate_cypher_query(question=query_text)
+            
+            parallel_tasks.append(cypher_generation_wrapper())
+            cypher_gen_task_idx = len(parallel_tasks) - 1
+        else:
+            logger.info("Cypher Search not enabled.")
+
+        # --- Execute MQR and Cypher Generation Concurrently (if any tasks) ---
+        if parallel_tasks:
+            logger.info(f"GraphForRAG.search: Running {len(parallel_tasks)} generation tasks concurrently (MQR and/or Cypher Gen).")
+            parallel_start_time = time.perf_counter()
+            gathered_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+            parallel_duration = (time.perf_counter() - parallel_start_time) * 1000
+            logger.info(f"GraphForRAG.search: Concurrent generation tasks finished in {parallel_duration:.2f} ms.")
+
+            # Process MQR results
+            if mqr_task_idx != -1:
+                mqr_result_or_exc = gathered_results[mqr_task_idx]
+                if isinstance(mqr_result_or_exc, Exception):
+                    logger.error(f"MQR generation failed: {mqr_result_or_exc}", exc_info=mqr_result_or_exc)
+                    alternative_queries_list = []
+                elif isinstance(mqr_result_or_exc, tuple) and len(mqr_result_or_exc) == 2:
+                    alternative_queries_list, mqr_usage = mqr_result_or_exc
+                    self._accumulate_generative_usage(mqr_usage)
+                    # total_mqr_generation_duration is now part of parallel_duration, can log specific if needed
+                    logger.info(f"MQR: Found {len(alternative_queries_list)} alternatives from concurrent execution.")
+                else:
+                    logger.error(f"Unexpected result from MQR generation wrapper: {type(mqr_result_or_exc)}")
+                    alternative_queries_list = []
+                
+                if config.mqr_config and config.mqr_config.include_original_query:
+                    all_queries_to_process.append(query_text)
+                if alternative_queries_list: # Check if list is not empty
+                    all_queries_to_process.extend(alternative_queries_list)
+
+            # Process Cypher generation results
+            if cypher_gen_task_idx != -1:
+                cypher_result_or_exc = gathered_results[cypher_gen_task_idx]
+                if isinstance(cypher_result_or_exc, Exception):
+                    logger.error(f"Cypher query generation failed: {cypher_result_or_exc}", exc_info=cypher_result_or_exc)
+                    generated_cypher_query = None
+                elif isinstance(cypher_result_or_exc, tuple) and len(cypher_result_or_exc) == 2:
+                    generated_cypher_query, cypher_generation_usage = cypher_result_or_exc
+                    self._accumulate_generative_usage(cypher_generation_usage)
+                    # cypher_generation_duration is now part of parallel_duration
+                    if generated_cypher_query:
+                        logger.info(f"Cypher Search: Generated Cypher query from concurrent execution:\n{generated_cypher_query}")
+                    else:
+                        logger.info("Cypher Search: No Cypher query was generated by the LLM.")
+                else:
+                     logger.error(f"Unexpected result from Cypher generation wrapper: {type(cypher_result_or_exc)}")
+                     generated_cypher_query = None
+        
+        # If no MQR was run but original query should be processed
+        if not all_queries_to_process and (not config.mqr_config or not config.mqr_config.enabled or not config.mqr_config.include_original_query):
+            all_queries_to_process.append(query_text) # Ensure original query is processed if MQR didn't add it
+        elif not all_queries_to_process and config.mqr_config and config.mqr_config.enabled and config.mqr_config.include_original_query:
+             all_queries_to_process.append(query_text) # Ensure original query if MQR ran but somehow yielded no queries for processing including original
+        elif not all_queries_to_process and not (config.mqr_config and config.mqr_config.enabled): # Case where MQR is off
+             all_queries_to_process.append(query_text)
+
+
+        if not all_queries_to_process and not generated_cypher_query:
+            logger.warning("MQR/Standard search resulted in no queries, and Cypher search yielded no query. Search will be skipped.")
+            return CombinedSearchResults(query_text=_original_user_query_for_report)
+        
+        logger.info(f"Total keyword/semantic queries to process: {len(all_queries_to_process)}")
+        if generated_cypher_query:
+             logger.info(f"LLM-Generated Cypher query will also be processed.")
+             
         query_to_embedding_map: Dict[str, Optional[List[float]]] = {}
         total_embedding_generation_duration = 0.0
         
@@ -379,6 +481,27 @@ class GraphForRAG:
             logger.info("GRAPHFORRAG.search: No queries required semantic embeddings.")
 
         raw_results_by_type_query_method: Dict[str, Dict[str, Dict[str, List[Dict[str, Any]]]]] = defaultdict(lambda: defaultdict(dict))
+        llm_cypher_execution_results: List[Dict[str, Any]] = [] # To store results from LLM Cypher
+        total_llm_cypher_execution_duration = 0.0
+
+        # --- Execute LLM-Generated Cypher Query (if available) ---
+        # This happens *before* the loop over all_queries_to_process for standard search,
+        # as the Cypher query is based on the *original* user query.
+        # We need the embedding of the *original* user query for potential binding.
+        original_query_embedding: Optional[List[float]] = None
+        if query_text in query_to_embedding_map: # Ensure original query's embedding exists if needed
+            original_query_embedding = query_to_embedding_map[query_text]
+        
+        if generated_cypher_query and config.cypher_search_config and config.cypher_search_config.enabled:
+            cypher_exec_start_time = time.perf_counter()
+            llm_cypher_execution_results = await self.search_manager.execute_llm_generated_cypher(
+                generated_cypher_query=generated_cypher_query,
+                original_query_text=_original_user_query_for_report, # Pass the absolute original query
+                query_embedding=original_query_embedding # Pass embedding of the original query
+            )
+            total_llm_cypher_execution_duration = (time.perf_counter() - cypher_exec_start_time) * 1000
+            logger.info(f"GraphForRAG.search: LLM-generated Cypher execution completed in {total_llm_cypher_execution_duration:.2f} ms. Found {len(llm_cypher_execution_results)} items.")
+            # These results are raw list of dicts. We'll add them to CombinedSearchResults later.
         
         total_sequential_search_calls_duration = 0.0
 
@@ -977,7 +1100,39 @@ class GraphForRAG:
             
             if additional_facts_added:
                 snippet_parts.append("")
-
+                
+        # --- NEW: Add LLM-generated Cypher query and its results to the snippet ---
+        if generated_cypher_query and llm_cypher_execution_results: # Check if query was generated AND executed AND returned results
+            snippet_parts.append("\n--- Results from LLM-Generated Cypher Query ---")
+            snippet_parts.append(f"Executed Cypher Query:\n{generated_cypher_query.strip()}")
+            if llm_cypher_execution_results:
+                snippet_parts.append("\nQuery Results:")
+                for i, res_item in enumerate(llm_cypher_execution_results):
+                    if i < 5: # Limit to first 5 results for snippet brevity
+                        # Convert dict to a more readable string format for the snippet
+                        try:
+                            res_item_str = json.dumps(res_item, indent=2, default=str) # Use default=str for non-serializable types
+                            snippet_parts.append(f"  - Result {i+1}: {res_item_str}")
+                        except TypeError: # Fallback if json.dumps fails with default=str
+                            snippet_parts.append(f"  - Result {i+1}: {str(res_item)} (Note: complex data types)")
+                    elif i == 5:
+                        snippet_parts.append(f"  ... (and {len(llm_cypher_execution_results) - 5} more items from Cypher query)")
+                        break
+            else: # Query was executed but returned no results
+                snippet_parts.append("Query Results: No data returned from this query.")
+            snippet_parts.append("") # Add a blank line for spacing
+        elif generated_cypher_query and not llm_cypher_execution_results and config.cypher_search_config and config.cypher_search_config.enabled:
+            # Case where query was generated but execution yielded empty list (e.g., query ran fine but found nothing, or error during exec returned [])
+            snippet_parts.append("\n--- LLM-Generated Cypher Query ---")
+            snippet_parts.append(f"Executed Cypher Query:\n{generated_cypher_query.strip()}")
+            snippet_parts.append("Query Results: No data returned or execution failed.")
+            snippet_parts.append("")
+        elif config.cypher_search_config and config.cypher_search_config.enabled and not generated_cypher_query:
+            # Case where Cypher search was enabled but LLM failed to generate a query
+             snippet_parts.append("\n--- LLM-Generated Cypher Query ---")
+             snippet_parts.append("Note: Cypher query generation was enabled, but no query was successfully generated by the LLM.")
+             snippet_parts.append("")
+             
         generated_context_snippet = "\n".join(snippet_parts) if snippet_parts else None
         snippet_generation_duration = (time.perf_counter() - snippet_generation_start_time) * 1000
         logger.info(f"GRAPHFORRAG.search: Context snippet generation took {snippet_generation_duration:.2f} ms.")
@@ -1149,11 +1304,13 @@ class GraphForRAG:
         return CombinedSearchResults(
             items=final_results_list, 
             query_text=_original_user_query_for_report, 
-            context_snippet=generated_context_snippet,
-            source_data_references=final_source_data_references, # ADDED
-            source_data_snippet=generated_source_data_snippet    # ADDED
+               context_snippet=generated_context_snippet,
+            source_data_references=final_source_data_references, 
+            source_data_snippet=generated_source_data_snippet,
+            executed_llm_cypher_query=generated_cypher_query if (config.cypher_search_config and config.cypher_search_config.enabled and generated_cypher_query) else None,
+            # Populate with empty list if enabled & query generated but no results, else None
+            raw_llm_cypher_query_results=llm_cypher_execution_results if (config.cypher_search_config and config.cypher_search_config.enabled and generated_cypher_query) else None
         )
-
     
     
     def _apply_inter_query_rrf(

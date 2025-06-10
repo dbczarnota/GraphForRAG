@@ -11,9 +11,9 @@ from graphforrag_core.search_types import (
     ProductSearchConfig, ProductSearchMethod, 
     MentionSearchConfig, MentionSearchMethod, # ADDED MentionSearchConfig, MentionSearchMethod
     CombinedSearchResults, SearchResultItem,
-    MultiQueryConfig 
+    MultiQueryConfig, CypherSearchConfig
 )
-from graphforrag_core.types import IngestionConfig
+from graphforrag_core.types import IngestionConfig, FlaggedPropertiesConfig, PropertyValueConfig
 from dotenv import load_dotenv
 import os
 import logging
@@ -139,9 +139,10 @@ async def main():
 
         # full_search_query = "What is Pooh favourite food?"
         # full_search_query = "What type of cover does Surface Pro have?"
-        full_search_query = "What is cheaper Surface Pro or Macbook air?"
+        # full_search_query = "What is cheaper Surface Pro or Macbook air?"
         # full_search_query = "Apple MacBook Air (M3 Chip)"
         # full_search_query = "ASUS ROG Zephyrus G16 (2024 GU605)"
+        full_search_query = "What is the cheapest laptop for power users?"
         
         timings["query_embedding_generation (explicit_in_main)"] = 0.0 
         logger.info(f"MAIN: Explicit query embedding generation in main is SKIPPED for this test.")
@@ -223,6 +224,20 @@ async def main():
                 # Example: Exclude original, only use alternatives (if any generated)
                 # include_original_query=False,
                 # max_alternative_questions=3 
+            ),
+            cypher_search_config=CypherSearchConfig( # ADDED Cypher Search Config
+                enabled=True, 
+                
+                llm_models=["gpt-4o-mini", "gemini-2.0-flash"], # Optionally specify models for Cypher generation
+                flagged_properties_config=FlaggedPropertiesConfig(
+                        nodes={
+                            "Product": {
+                                "category": PropertyValueConfig(limit=10),
+                                "target_audience_tags": PropertyValueConfig(limit=10)
+                            },
+
+                        },                    
+                    ) # Optionally customize schema for Cypher LLM
             ),
             overall_results_limit=15 
         )
@@ -348,7 +363,26 @@ async def main():
                     except IOError as e:
                         logger.error(f"Failed to write source data references snippet to file '{source_snippet_filename}': {e}")
                 else:
-                    logger.info("No source data references snippet generated to save.")                 
+                    logger.info("No source data references snippet generated to save.")  
+
+                # Log LLM-generated Cypher query and results if present
+                if combined_results.executed_llm_cypher_query:
+                    logger.info(f"\n--- LLM-Generated Cypher Query Executed ---")
+                    logger.info(f"{combined_results.executed_llm_cypher_query}")
+                    if combined_results.raw_llm_cypher_query_results:
+                        logger.info(f"  --- Raw Results from LLM Cypher ({len(combined_results.raw_llm_cypher_query_results)} items) ---")
+                        for i, cypher_res_item in enumerate(combined_results.raw_llm_cypher_query_results):
+                            if i < 10: # Limit display for brevity
+                                logger.info(f"    {i+1}. {cypher_res_item}")
+                            elif i == 10:
+                                logger.info(f"    ... (and {len(combined_results.raw_llm_cypher_query_results) - 10} more items)")
+                                break
+                    else:
+                        logger.info("  --- No raw results returned from the executed LLM Cypher query. ---")
+                elif comprehensive_search_config.cypher_search_config and comprehensive_search_config.cypher_search_config.enabled:
+                    logger.info("\n--- LLM-Generated Cypher Search was enabled, but no query was generated or executed. ---")
+
+
             else:
                 logger.warning("Skipping search call as no data exists and data setup was not run.")
                 timings["comprehensive_search_call (graph.search)"] = 0.0

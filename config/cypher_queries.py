@@ -845,3 +845,35 @@ SHOW INDEXES YIELD name, type, entityType, labelsOrTypes, properties, options
 RETURN name, type, entityType, labelsOrTypes, properties, options
 ORDER BY type, name
 """
+
+GET_DISTINCT_NODE_PROPERTY_VALUES = """
+MATCH (n:`{node_label_placeholder}`)
+WHERE n.`{property_name_placeholder}` IS NOT NULL
+WITH n.`{property_name_placeholder}` AS prop_value
+UNWIND (CASE 
+            WHEN prop_value IS :: LIST<ANY> THEN prop_value 
+            ELSE [prop_value] 
+        END) AS single_item
+WITH single_item 
+WHERE single_item IS NOT NULL AND trim(toString(single_item)) <> "" 
+WITH DISTINCT toString(single_item) AS value
+RETURN value
+ORDER BY value
+LIMIT $limit_param
+"""
+
+GET_DISTINCT_REL_PROPERTY_VALUES = """
+MATCH ()-[r:`{rel_type_placeholder}`]->()
+WHERE r.`{property_name_placeholder}` IS NOT NULL
+WITH r.`{property_name_placeholder}` AS prop_value
+UNWIND (CASE 
+            WHEN prop_value IS :: LIST<ANY> THEN prop_value 
+            ELSE [prop_value] 
+        END) AS single_item
+WITH single_item 
+WHERE single_item IS NOT NULL AND trim(toString(single_item)) <> "" 
+WITH DISTINCT toString(single_item) AS value
+RETURN value
+ORDER BY value
+LIMIT $limit_param
+"""

@@ -12,6 +12,7 @@ from files.llm_models import setup_fallback_model # Import the setup function
 from graphforrag_core.schema_manager import SchemaManager 
 from graphforrag_core.embedder_client import EmbedderClient
 from graphforrag_core.openai_embedder import OpenAIEmbedder, OpenAIEmbedderConfig
+from graphforrag_core.types import FlaggedPropertiesConfig, PropertyValueConfig
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -106,7 +107,24 @@ The question is:
 
 async def get_db_schema_with_indexes(driver: AsyncDriver, db_name: str, embedder: EmbedderClient) -> str:
     """Helper to get the schema string including index information."""
-    schema_manager = SchemaManager(driver, db_name, embedder)
+    example_flagged_config = FlaggedPropertiesConfig(
+        nodes={
+            "Product": {
+                "category": PropertyValueConfig(limit=5),
+                "brand": PropertyValueConfig(limit=10),
+                "target_audience_tags": PropertyValueConfig(limit=10)
+            },
+            "Entity": {
+                "label": PropertyValueConfig(limit=15)
+            }
+        },
+        relationships={ # Added example for relationship property
+            "RELATES_TO": {
+                "relation_label": PropertyValueConfig(limit=7)
+            }
+        }
+    )
+    schema_manager = SchemaManager(driver, db_name, embedder, flagged_properties_config=example_flagged_config)
     full_schema_with_indexes = await schema_manager.get_schema_string()
     logger.info(f"Generated Schema: \n{full_schema_with_indexes}")
     return full_schema_with_indexes

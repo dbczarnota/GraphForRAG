@@ -756,3 +756,50 @@ class SearchManager:
         logger.info(f"SearchManager: Product data fetching for '{query_text}' completed in {duration:.2f} ms. Results per method: {method_counts}")
         
         return fetched_results_by_method
+    async def execute_llm_generated_cypher(
+        self,
+        generated_cypher_query: str,
+        original_query_text: str, # For potential parameter binding or context
+        query_embedding: Optional[List[float]] # For binding $query_embedding
+    ) -> List[Dict[str, Any]]:
+        """
+        Executes an LLM-generated Cypher query and returns the raw results.
+        Handles basic parameter binding for $query_embedding.
+        """
+        if not generated_cypher_query.strip():
+            logger.warning("SearchManager.execute_llm_generated_cypher: Received empty Cypher query. Skipping execution.")
+            return []
+
+        params: Dict[str, Any] = {}
+        if "$query_embedding" in generated_cypher_query:
+            if query_embedding:
+                params["query_embedding"] = query_embedding
+                logger.debug("Bound $query_embedding for LLM-generated Cypher.")
+            else:
+                logger.warning("LLM-generated Cypher contains $query_embedding, but no embedding was provided. Query might fail or return unexpected results.")
+        
+        # Placeholder for other potential parameters if LLM starts generating them
+        # For example, if LLM generates a query like "MATCH (n) WHERE n.name = $name_param RETURN n"
+        # We would need a mechanism to extract $name_param from original_query_text or have LLM provide it.
+        # For now, we only explicitly handle $query_embedding.
+
+        logger.info(f"SearchManager: Executing LLM-generated Cypher for original query '{original_query_text[:50]}...'.")
+        logger.debug(f"Generated Cypher:\n{generated_cypher_query}\nParams: { {k: (type(v).__name__ if not isinstance(v, list) else f'list_len_{len(v)}') for k,v in params.items()} }")
+        
+        try:
+            fetch_start_time = time.perf_counter()
+            results, _, _ = await self.driver.execute_query(
+                generated_cypher_query,
+                parameters_=params, # Use parameters_ argument
+                database_=self.database
+            )
+            fetch_duration = (time.perf_counter() - fetch_start_time) * 1000
+            logger.info(f"SearchManager: LLM-generated Cypher execution took {fetch_duration:.2f} ms. Returned {len(results)} rows.")
+            return [dict(record) for record in results]
+        except Exception as e:
+            # Log the specific Cypher query that failed along with the error.
+            logger.error(f"SearchManager: Error executing LLM-generated Cypher. Query: \n{generated_cypher_query}\nParams: {params}\nError: {e}", exc_info=True)
+            # Return an empty list to indicate failure but allow the overall search to continue.
+            # Optionally, you could return a specific error marker if the calling code needs to distinguish
+            # between "no results found" and "query execution failed". For now, empty list is simple.
+            return []

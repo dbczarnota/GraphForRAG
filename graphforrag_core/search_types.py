@@ -2,6 +2,7 @@
 from enum import Enum
 from typing import List, Optional, Dict, Any, Literal # Ensure Literal is imported
 from pydantic import BaseModel, Field
+from .types import FlaggedPropertiesConfig # Explicitly import FlaggedPropertiesConfig
 
 # --- Chunk Search Specific ---
 class ChunkSearchMethod(str, Enum):
@@ -14,8 +15,8 @@ class ChunkRerankerMethod(str, Enum):
 class ChunkSearchConfig(BaseModel):
     search_methods: List[ChunkSearchMethod] = Field(default_factory=lambda: [ChunkSearchMethod.KEYWORD, ChunkSearchMethod.SEMANTIC])
     reranker: ChunkRerankerMethod = ChunkRerankerMethod.RRF
-    limit: int = Field(default=10, description="Final number of results to return for this type if min_results is not dominant.") # Wording slightly adjusted
-    min_results: int = Field(default=0, ge=0, description="Minimum number of chunk results to try to include, if available. Overrides 'limit' for this type if necessary to meet this minimum.") # ADDED
+    limit: int = Field(default=10, description="Final number of results to return for this type if min_results is not dominant.")
+    min_results: int = Field(default=0, ge=0, description="Minimum number of chunk results to try to include, if available. Overrides 'limit' for this type if necessary to meet this minimum.")
     keyword_fetch_limit: int = Field(default=20)
     semantic_fetch_limit: int = Field(default=20)
     min_similarity_score: float = Field(default=0.7)
@@ -24,23 +25,20 @@ class ChunkSearchConfig(BaseModel):
 
 # --- Entity Search Specific ---
 class EntitySearchMethod(str, Enum):
-    KEYWORD_NAME = "keyword_name_fulltext" # Renamed from KEYWORD_NAME_DESC
+    KEYWORD_NAME = "keyword_name_fulltext"
     SEMANTIC_NAME = "semantic_name_vector"
-    # SEMANTIC_DESCRIPTION = "semantic_description_vector" # REMOVED
 
 class EntityRerankerMethod(str, Enum):
     RRF = "reciprocal_rank_fusion"
 
 class EntitySearchConfig(BaseModel):
-    search_methods: List[EntitySearchMethod] = Field(default_factory=lambda: [EntitySearchMethod.KEYWORD_NAME, EntitySearchMethod.SEMANTIC_NAME]) # Updated default
+    search_methods: List[EntitySearchMethod] = Field(default_factory=lambda: [EntitySearchMethod.KEYWORD_NAME, EntitySearchMethod.SEMANTIC_NAME])
     reranker: EntityRerankerMethod = EntityRerankerMethod.RRF
     limit: int = Field(default=10, description="Final number of results to return for this type if min_results is not dominant.")
     min_results: int = Field(default=0, ge=0, description="Minimum number of entity results to try to include, if available.") 
     keyword_fetch_limit: int = Field(default=20)
     semantic_name_fetch_limit: int = Field(default=20)
-    # semantic_description_fetch_limit: int = Field(default=20) # REMOVED
     min_similarity_score_name: float = Field(default=0.7)
-    # min_similarity_score_description: float = Field(default=0.65) # REMOVED
     rrf_k: int = Field(default=60)
 
 # --- Relationship Search Specific ---
@@ -57,7 +55,7 @@ class RelationshipSearchConfig(BaseModel):
     )
     reranker: RelationshipRerankerMethod = RelationshipRerankerMethod.RRF
     limit: int = Field(default=10, description="Final number of results to return for this type if min_results is not dominant.")
-    min_results: int = Field(default=0, ge=0, description="Minimum number of relationship results to try to include, if available.") # ADDED
+    min_results: int = Field(default=0, ge=0, description="Minimum number of relationship results to try to include, if available.")
     keyword_fetch_limit: int = Field(default=20)
     semantic_fetch_limit: int = Field(default=20)
     min_similarity_score: float = Field(default=0.7, description="Minimum similarity score for semantic search on relationship facts.")
@@ -65,8 +63,8 @@ class RelationshipSearchConfig(BaseModel):
 
 # --- NEW: Mention Search Specific ---
 class MentionSearchMethod(str, Enum):
-    KEYWORD_FACT = "keyword_fact_fulltext"  # Using existing FT index for MENTIONS.fact_sentence
-    SEMANTIC_FACT = "semantic_fact_vector" # Using existing vector index for MENTIONS.fact_embedding
+    KEYWORD_FACT = "keyword_fact_fulltext"
+    SEMANTIC_FACT = "semantic_fact_vector"
 
 class MentionRerankerMethod(str, Enum):
     RRF = "reciprocal_rank_fusion"
@@ -97,7 +95,7 @@ class SourceSearchConfig(BaseModel):
     )
     reranker: SourceRerankerMethod = SourceRerankerMethod.RRF
     limit: int = Field(default=5, description="Final number of results to return for Source type if min_results is not dominant.")
-    min_results: int = Field(default=0, ge=0, description="Minimum number of source results to try to include, if available.") # ADDED
+    min_results: int = Field(default=0, ge=0, description="Minimum number of source results to try to include, if available.")
     keyword_fetch_limit: int = Field(default=10)
     semantic_fetch_limit: int = Field(default=10)
     min_similarity_score: float = Field(default=0.7)
@@ -107,14 +105,13 @@ class SourceSearchConfig(BaseModel):
 class SearchResultItem(BaseModel):
     uuid: str
     name: Optional[str] = None 
-    content: Optional[str] = None # For Chunk, Source, Product (JSON string)
-    # description: Optional[str] = None # REMOVED
-    fact_sentence: Optional[str] = None # For Relationship and Mention
-    label: Optional[str] = None # For Entity
-    source_node_uuid: Optional[str] = None # For Relationship and Mention (source of mention, e.g., Chunk)
-    target_node_uuid: Optional[str] = None # For Relationship and Mention (target of mention, e.g., Entity/Product)
+    content: Optional[str] = None 
+    fact_sentence: Optional[str] = None 
+    label: Optional[str] = None 
+    source_node_uuid: Optional[str] = None 
+    target_node_uuid: Optional[str] = None 
     score: float
-    result_type: Literal["Chunk", "Entity", "Relationship", "Source", "Product", "Mention"] # Added Product and Mention here
+    result_type: Literal["Chunk", "Entity", "Relationship", "Source", "Product", "Mention"] 
     connected_facts: Optional[List[Dict[str, Any]]] = Field(
         default=None, 
         description="List of connected facts/relationships for Entity or Product nodes. Each fact is a dictionary."
@@ -127,7 +124,10 @@ class CombinedSearchResults(BaseModel):
     context_snippet: Optional[str] = Field(default=None, description="A formatted string combining relevant information from search results, suitable for LLM context.")
     source_data_references: Optional[List[SearchResultItem]] = Field(default=None, description="A list of unique Source, Chunk, and Product nodes that contributed to the main search results.")
     source_data_snippet: Optional[str] = Field(default=None, description="A textual snippet derived from the source_data_references.")
+    executed_llm_cypher_query: Optional[str] = Field(default=None, description="The LLM-generated Cypher query that was executed, if any.")
+    raw_llm_cypher_query_results: Optional[List[Dict[str, Any]]] = Field(default=None, description="Raw list of dictionary results from the executed LLM-generated Cypher query, if any.")
     
+        
         
 class MultiQueryConfig(BaseModel):
     enabled: bool = Field(default=False, description="Whether to enable Multi-Query Retrieval.")
@@ -137,7 +137,7 @@ class MultiQueryConfig(BaseModel):
     )
     max_alternative_questions: int = Field(
         default=3, 
-        ge=1, # Allow 0 alternative questions if only original is needed with MQR-specific LLM
+        ge=0, # Changed from ge=1 to allow 0 alternatives when include_original_query=True and MQR LLM is used
         le=5, 
         description="Maximum number of alternative questions to generate. If 0, and include_original_query is True, only the original query runs (potentially with specific MQR LLM)."
     )
@@ -145,9 +145,22 @@ class MultiQueryConfig(BaseModel):
         default=None,
         description="Optional list of LLM model names (e.g., ['gpt-4o-mini', 'gemini-2.0-flash']) to use specifically for MQR generation. If None, uses the default LLM client of the MultiQueryGenerator service."
     )
-    # Ensure max_alternative_questions constraint still makes sense. If include_original_query is false, ge=1 for max_alternative_questions might be better if enabled=True.
-    # For now, ge=0 is fine, but if enabled=True, include_original_query=False, and max_alternative_questions=0, then MQR effectively does nothing.
-    
+
+class CypherSearchConfig(BaseModel):
+    """Configuration for LLM-generated Cypher search."""
+    enabled: bool = Field(default=False, description="Whether to enable LLM-generated Cypher search.")
+    llm_models: Optional[List[str]] = Field(
+        default=None,
+        description="Optional list of LLM model names to use specifically for Cypher query generation. If None, uses a default LLM setup."
+    )
+    flagged_properties_config: Optional[FlaggedPropertiesConfig] = Field( 
+        default=None,
+        description="Optional configuration for flagging properties to include their distinct values in the schema provided to the Cypher generation LLM."
+    )
+    # Placeholder for future: custom_prompt_template: Optional[str] = None
+
+CypherSearchConfig.model_rebuild() # Resolve forward references
+
 # --- NEW: Product Search Specific ---
 class ProductSearchMethod(str, Enum):
     KEYWORD_NAME_CONTENT = "keyword_name_content_fulltext"
@@ -172,7 +185,7 @@ class ProductSearchConfig(BaseModel):
     semantic_name_fetch_limit: int = Field(default=10)
     semantic_content_fetch_limit: int = Field(default=10)
     min_similarity_score_name: float = Field(default=0.7)
-    min_similarity_score_content: float = Field(default=0.65) # Content (JSON string) might need lower threshold
+    min_similarity_score_content: float = Field(default=0.65)
     rrf_k: int = Field(default=60)
     
     
@@ -182,11 +195,11 @@ class SearchConfig(BaseModel):
     relationship_config: Optional[RelationshipSearchConfig] = Field(default_factory=RelationshipSearchConfig)
     source_config: Optional[SourceSearchConfig] = Field(default_factory=SourceSearchConfig) 
     product_config: Optional[ProductSearchConfig] = Field(default_factory=ProductSearchConfig) 
-    mention_config: Optional[MentionSearchConfig] = Field(default_factory=MentionSearchConfig) # ADDED Mention config
+    mention_config: Optional[MentionSearchConfig] = Field(default_factory=MentionSearchConfig) 
     mqr_config: Optional[MultiQueryConfig] = Field(default=None, description="Configuration for Multi-Query Retrieval. If None, MQR is disabled.")
+    cypher_search_config: Optional[CypherSearchConfig] = Field(default=None, description="Configuration for LLM-generated Cypher search. If None, this search type is disabled.") # NEW
     overall_results_limit: Optional[int] = Field(
         default=10, 
         ge=1, 
         description="Optional overall limit for the final number of results returned by the combined search. Applied after aggregation and sorting."
     )
-    
