@@ -608,4 +608,6 @@ class SchemaManager:
         
         # schema_parts.extend(index_info_list)
         
-        return "\n".join(schema_parts)
+        final_schema_string = "\n".join(schema_parts)
+        logger.debug(f"SchemaManager.get_schema_string() - Dynamically generated schema (first 5000 chars):\n{final_schema_string[:5000]}{'...' if len(final_schema_string) > 5000 else ''}")
+        return final_schema_string

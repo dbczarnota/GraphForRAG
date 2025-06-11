@@ -163,12 +163,66 @@ async def main():
             user=NEO4J_USER,
             password=NEO4J_PASSWORD,
             embedder_client=openai_embedder, # Pass the embedder
-            flagged_properties_config=example_flagged_config_for_graph_schema # Pass the new config
+            default_schema_flagged_properties_config=example_flagged_config_for_graph_schema # Pass the new config
         )
         
         logger.info("SCHEMA (from GraphForRAG.get_schema()):")
         schema_string = await graph_for_rag_instance.get_schema()
         logger.info(textwrap.fill(schema_string, 120)) # Wider fill for potentially long lines
+
+        logger.info("\n--- Testing Cypher Query Generation ---")
+        
+        # Example question
+        user_question_for_cypher = "Find cheap Dell laptops for students."
+
+        # 1. Generate Cypher with dynamically fetched schema (using G4R's default schema manager config)
+        logger.info(f"\n1. Generating Cypher for question: '{user_question_for_cypher}' (using dynamic schema)")
+        if graph_for_rag_instance.cypher_generator: # Access via property
+            # The CypherGenerator instance from GraphForRAG uses the flagged_properties_config
+            # that GraphForRAG was initialized with for its SchemaManager.
+            # If a specific LLM for Cypher generation is needed, it should be configured
+            # when GraphForRAG initializes its CypherGenerator, or CypherGenerator 
+            # could be reconfigured/re-instantiated here with specific models if needed.
+            # For this example, we use the default from G4R.
+            generated_query_dynamic, usage_dynamic = await graph_for_rag_instance.cypher_generator.generate_cypher_query(
+                question=user_question_for_cypher
+                # custom_schema_string is None by default, so it uses schema_manager
+            )
+            if generated_query_dynamic:
+                logger.info(f"Dynamically Generated Cypher:\n{generated_query_dynamic}")
+                if usage_dynamic: logger.info(f"Dynamic Gen Usage: {usage_dynamic.total_tokens} tokens")
+            else:
+                logger.warning("Failed to generate Cypher query using dynamic schema.")
+        else:
+            logger.error("GraphForRAG instance does not have a CypherGenerator.")
+
+        # 2. Generate Cypher with a custom schema string
+        logger.info(f"\n2. Generating Cypher for question: '{user_question_for_cypher}' (using custom schema)")
+        custom_test_schema = """Node properties:
+Product {name: STRING, category: STRING {possible values: {Laptop, Desktop}}, price: FLOAT, brand: STRING {possible values: {Dell, Apple, HP}}}
+Student {name: STRING, budget: FLOAT}
+Relationship properties:
+SUITABLE_FOR {}
+MENTIONS {}
+The relationships:
+(Chunk)-[:MENTIONS]->(Product)
+(Product)-[:SUITABLE_FOR]->(Student)
+(Entity)-[:RELATES_TO]->(Entity)""" # Note: I corrected a slight syntax issue in your example custom schema (removed extra (Entity)-[:RELATES_TO]->(Entity)) if that was unintentional, if not, it's fine.
+
+        if graph_for_rag_instance.cypher_generator:
+            # We'll use the same CypherGenerator instance from GraphForRAG,
+            # but pass the custom_schema_string to its generate_cypher_query method.
+            generated_query_custom, usage_custom = await graph_for_rag_instance.cypher_generator.generate_cypher_query(
+                question=user_question_for_cypher,
+                custom_schema_string=custom_test_schema
+            )
+            if generated_query_custom:
+                logger.info(f"Custom Schema Generated Cypher:\n{generated_query_custom}")
+                if usage_custom: logger.info(f"Custom Gen Usage: {usage_custom.total_tokens} tokens")
+            else:
+                logger.warning("Failed to generate Cypher query using custom schema.")
+        else:
+            logger.error("GraphForRAG instance does not have a CypherGenerator for custom schema test.")
 
     except Exception as e_main:
         logger.error(f"An error occurred in graph_schema.py main: {e_main}", exc_info=True)

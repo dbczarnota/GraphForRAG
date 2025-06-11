@@ -23,12 +23,14 @@ from datetime import datetime
 import time 
 import asyncio
 from typing import List, Dict, Any, Optional 
+from config.custom_schema import CUSTOM_SHEMA_STRING
 
 # Ensure logging is at DEBUG for search_manager to see detailed logs
 # logging.getLogger("graph_for_rag.search_manager").setLevel(logging.DEBUG)
 # logging.getLogger("graph_for_rag.graphforrag").setLevel(logging.DEBUG) 
 # logging.getLogger("graph_for_rag.multi_query_generator").setLevel(logging.DEBUG) 
-logging.getLogger("llm_models").setLevel(logging.INFO) 
+# logging.getLogger("llm_models").setLevel(logging.INFO) 
+logging.getLogger("graph_for_rag.schema").setLevel(logging.DEBUG)
 
 logging.basicConfig(
     level=logging.INFO, 
@@ -237,7 +239,8 @@ async def main():
                             },
 
                         },                    
-                    ) # Optionally customize schema for Cypher LLM
+                    ),
+                custom_schema_string=CUSTOM_SHEMA_STRING
             ),
             overall_results_limit=15 
         )

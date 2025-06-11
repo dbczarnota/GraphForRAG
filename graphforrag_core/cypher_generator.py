@@ -125,6 +125,7 @@ class CypherGenerator:
     async def generate_cypher_query(
         self,
         question: str,
+        custom_schema_string: Optional[str] = None,
     ) -> Tuple[Optional[str], Optional[Usage]]:
         """
         Generates a Cypher query from a natural language question using an LLM,
@@ -132,16 +133,22 @@ class CypherGenerator:
         """
         current_op_usage: Optional[Usage] = None
         
-        logger.info(f"CypherGenerator: Fetching schema for question: '{question[:50]}...'")
-        # Schema string will now be generated using the flagged_properties_config passed to SchemaManager
-        schema_str = await self.schema_manager.get_schema_string()
-        if not schema_str or "Error" in schema_str:
-            logger.error(f"CypherGenerator: Failed to retrieve a valid schema. Cannot generate Cypher. Schema output: {schema_str}")
+        schema_to_use_for_llm: Optional[str] = None
+        if custom_schema_string:
+            logger.info(f"CypherGenerator: Using provided custom schema string for question: '{question[:50]}...'")
+            schema_to_use_for_llm = custom_schema_string
+        else:
+            logger.info(f"CypherGenerator: Fetching schema via SchemaManager for question: '{question[:50]}...'")
+            # SchemaManager instance within CypherGenerator already has its flagged_properties_config
+            schema_to_use_for_llm = await self.schema_manager.get_schema_string() 
+
+        if not schema_to_use_for_llm or "Error" in schema_to_use_for_llm: # Handles "Error" string from schema_manager or empty custom string
+            logger.error(f"CypherGenerator: Failed to obtain a valid schema. Cannot generate Cypher. Schema output/provided: {schema_to_use_for_llm}")
             return None, None
         
-        logger.debug(f"CypherGenerator: Schema for LLM (first 500 chars):\n{schema_str[:500]}...")
+        logger.debug(f"CypherGenerator: Schema for LLM (first 500 chars):\n{schema_to_use_for_llm[:500]}...")
 
-        prompt = CYPHER_GENERATION_TEMPLATE.format(schema_string=schema_str, question=question)
+        prompt = CYPHER_GENERATION_TEMPLATE.format(schema_string=schema_to_use_for_llm, question=question)
         
         try:
             logger.info(f"CypherGenerator: Attempting to generate Cypher query for: '{question[:50]}...'")

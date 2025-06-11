@@ -157,6 +157,10 @@ class CypherSearchConfig(BaseModel):
         default=None,
         description="Optional configuration for flagging properties to include their distinct values in the schema provided to the Cypher generation LLM."
     )
+    custom_schema_string: Optional[str] = Field(
+        default=None,
+        description="Optional pre-defined schema string to use for Cypher generation. If provided, dynamic schema fetching will be skipped."
+    )
     # Placeholder for future: custom_prompt_template: Optional[str] = None
 
 CypherSearchConfig.model_rebuild() # Resolve forward references

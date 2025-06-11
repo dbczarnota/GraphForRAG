@@ -361,7 +361,10 @@ class GraphForRAG:
                     embedder_client=self.embedder,
                     flagged_properties_config=cypher_gen_flagged_props_config
                 )
-                return await cypher_gen_instance.generate_cypher_query(question=query_text)
+                return await cypher_gen_instance.generate_cypher_query(
+                    question=query_text,
+                    custom_schema_string=config.cypher_search_config.custom_schema_string if config.cypher_search_config else None
+                )
             
             parallel_tasks.append(cypher_generation_wrapper())
             cypher_gen_task_idx = len(parallel_tasks) - 1
